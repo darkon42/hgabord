@@ -46,6 +46,15 @@
 #define M_PI       3.14159265358979323846
 #endif
 
+/* Fix 3: inline complex multiply — replaces paired CMREAL/CMIMAGINARY calls
+ * that recomputed the same four products twice. */
+static inline void cmul(double ar, double ai, double br, double bi,
+                        double *rr, double *ri)
+{
+	*rr = ar*br - ai*bi;
+	*ri = ar*bi + br*ai;
+}
+
 /*
 * routine for update the Gabor transformation
 *
@@ -167,7 +176,7 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 			kIndxStep = p1<<(Lj2-h2);
 			for (k2=0; k2<=k2Max; k2++) {
 				vi = vr+p2Max;
-				ntmp = kIndx%N;
+				ntmp = kIndx%N; /* Fix 6: computed once, reused for both pfCE1 lookups */
 				cos_phi = coeff*pfCE1[ntmp];
 				sin_phi = -coeff*pfCE1[N+ntmp];
 				kIndx += kIndxStep;
@@ -200,8 +209,13 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 	/*
 	* case 2: the selected word is Fourier
 	*/
-	cos_phi = coeff*cos(phi)/2.0;
-	sin_phi = coeff*sin(phi)/2.0;
+	/* Fix 2: compute cos/sin together with sincos() */
+	{
+	double _s, _c;
+	sincos(phi, &_s, &_c);
+	cos_phi = coeff*_c/2.0;
+	sin_phi = coeff*_s/2.0;
+	}
 	if (j1==L)
 		{
 		for ( j2= MinOctave;j2 <= MaxOctave; j2++)
@@ -250,13 +264,17 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 				*/
 				for (pIndx=0;pIndx<p2Max;pIndx++)
 					{
+					long ptmp; /* Fix 4: was p1 — avoided clobbering outer position variable */
+					long idx1, idx2; /* Fix 6: store %N results to avoid double computation */
 					p2 = pIndx<<pIndxStep;
-					p1 = labs(p2*(k1-k2));
-					dCos = pfCE1[p1%N];
-					dSin = pfCE1[N+p1%N];
-					p1 = labs(p2*(N-k1-k2));
-					dCos2 = pfCE1[p1%N];
-					dSin2 = pfCE1[N+p1%N];
+					ptmp = labs(p2*(k1-k2));
+					idx1 = ptmp%N;
+					dCos = pfCE1[idx1];
+					dSin = pfCE1[N+idx1];
+					ptmp = labs(p2*(N-k1-k2));
+					idx2 = ptmp%N;
+					dCos2 = pfCE1[idx2];
+					dSin2 = pfCE1[N+idx2];
 					dReal1 = dCos*dtmp1;
 					if (k2>k1)
 						dImag1 = -dSin*dtmp1;
@@ -280,8 +298,8 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 	/*
 	* case 3: the selected word is Gabor
 	*/
-	cos_2phi = cos(2.0*phi);
-	sin_2phi = sin(2.0*phi);
+	/* Fix 2: sincos() for the 2*phi pair */
+	sincos(2.0*phi, &sin_2phi, &cos_2phi);
 	for ( j2=MinOctave; j2<= MaxOctave; j2++)
 		{
 		/* compute the parameters */
@@ -445,14 +463,14 @@ int delta0(int stepP,long p1)
 */
 static void gnrRcsArray(double f[],long posIndxR,long posIndxI,long negIndxR,long negIndxI,double fm[])
 	{
-	double dtmp;
-
-	dtmp = CMREAL(f[posIndxR],f[posIndxI],fm[posIndxR],fm[posIndxI]);
-	f[posIndxI] = CMIMAGINARY(f[posIndxR],f[posIndxI],fm[posIndxR],fm[posIndxI]);
-	f[posIndxR] = dtmp;
-	dtmp = CMREAL(f[negIndxR],f[negIndxI],fm[negIndxR],fm[negIndxI]);
-	f[negIndxI] = CMIMAGINARY(f[negIndxR],f[negIndxI],fm[negIndxR],fm[negIndxI]);
-	f[negIndxR] = dtmp;
+	double rr, ri;
+	/* Fix 3: cmul() computes both parts in one shot */
+	cmul(f[posIndxR],f[posIndxI],fm[posIndxR],fm[posIndxI],&rr,&ri);
+	f[posIndxR] = rr;
+	f[posIndxI] = ri;
+	cmul(f[negIndxR],f[negIndxI],fm[negIndxR],fm[negIndxI],&rr,&ri);
+	f[negIndxR] = rr;
+	f[negIndxI] = ri;
 	}
 /*
 * generic recursive formula
@@ -469,14 +487,14 @@ static void gnrRcsArray(double f[],long posIndxR,long posIndxI,long negIndxR,lon
 */
 static void gnrRcs(double f[],long posIndxR,long posIndxI,long negIndxR,long negIndxI,double fmR,double fmI)
 	{
-	double dtmp;
-
-	dtmp = CMREAL(f[posIndxR],f[posIndxI],fmR,fmI);
-	f[posIndxI] = CMIMAGINARY(f[posIndxR],f[posIndxI],fmR,fmI);
-	f[posIndxR] = dtmp;
-	dtmp = CMREAL(f[negIndxR],f[negIndxI],fmR,fmI);
-	f[negIndxI] = CMIMAGINARY(f[negIndxR],f[negIndxI],fmR,fmI);
-	f[negIndxR] = dtmp;
+	double rr, ri;
+	/* Fix 3: cmul() */
+	cmul(f[posIndxR],f[posIndxI],fmR,fmI,&rr,&ri);
+	f[posIndxR] = rr;
+	f[posIndxI] = ri;
+	cmul(f[negIndxR],f[negIndxI],fmR,fmI,&rr,&ri);
+	f[negIndxR] = rr;
+	f[negIndxI] = ri;
 	}
 /*
 * generic recursive formula
@@ -495,14 +513,18 @@ static void gnrRcs(double f[],long posIndxR,long posIndxI,long negIndxR,long neg
 void genericRecursion(double f[],long posIndxR,long posIndxI,long negIndxR,long negIndxI,double fmR,double fmI)
 	{
 	static long posPrevR, posPrevI, negPrevR, negPrevI; /* previous indeces */
+	double rr, ri;
 	posPrevR = posIndxR-1;
 	posPrevI = posIndxI-1;
 	negPrevR = negIndxR+1;
 	negPrevI = negIndxI+1;
-	f[posIndxR] = CMREAL(f[posPrevR],f[posPrevI],fmR,fmI);
-	f[posIndxI] = CMIMAGINARY(f[posPrevR],f[posPrevI],fmR,fmI);
-	f[negIndxR] = CMREAL(f[negPrevR],f[negPrevI],fmR,-fmI);
-	f[negIndxI] = CMIMAGINARY(f[negPrevR],f[negPrevI],fmR,-fmI);
+	/* Fix 3: cmul() for both pairs */
+	cmul(f[posPrevR],f[posPrevI],fmR,fmI,&rr,&ri);
+	f[posIndxR] = rr;
+	f[posIndxI] = ri;
+	cmul(f[negPrevR],f[negPrevI],fmR,-fmI,&rr,&ri);
+	f[negIndxR] = rr;
+	f[negIndxI] = ri;
 	}
 /*
 * generic loop
@@ -651,32 +673,25 @@ void genericLoop(GABSIGNAL *trans,
 	* compute the initial values
 	*/
 	cpi = 2.0*M_PI*(double)(1<<(j1<<1))/(double)A;
-	/* compute f4_0 */
-	dtmp = cpi*(double)dk0;
-	f4_0[0] = cos(dtmp);
-	f4_0[1] = -sin(dtmp);
-	/* compute f6 */
-	dtmp = cpi*(double)N;
-	f6[0] = cos(dtmp);
-	f6[1] = -sin(dtmp);
-	/* compute f7 */
-	dtmp = cpi*(double)stepK;
-	f7[0] = cos(dtmp);
-	f7[1] = -sin(dtmp);
-	/* compute f8 */
-	dtmp = cpi*(double)dp0*(double)stepK/(double)N;
-	f8[0] = cos(dtmp);
-	f8[1] = -sin(dtmp);
-	dtmp = cpi*(double)stepK*(double)stepP/(double)N;
-	fs8[0] = cos(dtmp);
-	fs8[1] = -sin(dtmp);
-	/* compute f9 */
-	dtmp = cpi*dp0;
-	f9[0] = cos(dtmp);
-	f9[1] = -sin(dtmp);
-	dtmp = cpi*(double)stepP;
-	fs9[0] = cos(dtmp);
-	fs9[1] = -sin(dtmp);
+	/* compute f4_0 — Fix 2: sincos() */
+	sincos(cpi*(double)dk0, &f4_0[1], &f4_0[0]);
+	f4_0[1] = -f4_0[1];
+	/* compute f6 — Fix 2: sincos() */
+	sincos(cpi*(double)N, &f6[1], &f6[0]);
+	f6[1] = -f6[1];
+	/* compute f7 — Fix 2: sincos() */
+	sincos(cpi*(double)stepK, &f7[1], &f7[0]);
+	f7[1] = -f7[1];
+	/* compute f8 — Fix 2: sincos() */
+	sincos(cpi*(double)dp0*(double)stepK/(double)N, &f8[1], &f8[0]);
+	f8[1] = -f8[1];
+	sincos(cpi*(double)stepK*(double)stepP/(double)N, &fs8[1], &fs8[0]);
+	fs8[1] = -fs8[1];
+	/* compute f9 — Fix 2: sincos() */
+	sincos(cpi*dp0, &f9[1], &f9[0]);
+	f9[1] = -f9[1];
+	sincos(cpi*(double)stepP, &fs9[1], &fs9[0]);
+	fs9[1] = -fs9[1];
 	n = abs(j2-j1);
 	pMaxIndx = P2MAX(L,j2,l2);
 	kMaxIndx = K2MAX(j2,h2);
@@ -945,15 +960,13 @@ void genericLoop(GABSIGNAL *trans,
 					qIndxR = mqMax+qLB;
 					qIndxI = mqMax3+qLB;
 					for (q=qLB; q<=qRB; q++) {
+						double cr, ci;
 						dtmp = gauss*vg[qIndxR];
-						/*
-						* calculate the complex exponential add to
-						* the inner product
-						*/
-						ggR += CMREAL(f1[mIndx][qIndxR],f1[mIndx][qIndxI],
-							f2[qIndxR],f2[qIndxI])*dtmp;
-						ggI += CMIMAGINARY(f1[mIndx][qIndxR],f1[mIndx][qIndxI],
-							f2[qIndxR],f2[qIndxI])*dtmp;
+						/* Fix 3: cmul() — was CMREAL+CMIMAGINARY on same args */
+						cmul(f1[mIndx][qIndxR],f1[mIndx][qIndxI],
+						     f2[qIndxR],f2[qIndxI],&cr,&ci);
+						ggR += cr*dtmp;
+						ggI += ci*dtmp;
 						qIndxI++;
 						qIndxR++;
 						} /* endfor q */
@@ -986,10 +999,14 @@ void genericLoop(GABSIGNAL *trans,
 							* calculate the complex exponential add
 							* to the inner product
 							*/
-							ggR += CMREAL(f1[mIndx][qIndxR],f1[mIndx][qIndxI],
-								f2[qIndxR],f2[qIndxI])*gauss;
-							ggI += CMIMAGINARY(f1[mIndx][qIndxR],f1[mIndx][qIndxI],
-								f2[qIndxR],f2[qIndxI])*gauss;
+							{
+							double cr, ci;
+							/* Fix 3: cmul() */
+							cmul(f1[mIndx][qIndxR],f1[mIndx][qIndxI],
+							     f2[qIndxR],f2[qIndxI],&cr,&ci);
+							ggR += cr*gauss;
+							ggI += ci*gauss;
+							}
 							mIndx++;
 							} /* endfor m */
 						qIndxR++;
@@ -1015,8 +1032,8 @@ void genericLoop(GABSIGNAL *trans,
 				}
 			if (dkZero||dpZero)
 				{
-				ggRN = CMREAL(ggR,-ggI,cos_2phi,sin_2phi);
-				ggIN = CMIMAGINARY(ggR,-ggI,cos_2phi,sin_2phi);
+				/* Fix 3: cmul() */
+				cmul(ggR,-ggI,cos_2phi,sin_2phi,&ggRN,&ggIN);
 				}
 			if (dkZero&&k2N!=k2&&k2N!=-kMaxIndx)
 				{
@@ -1431,11 +1448,9 @@ long K2(long delta,long k1,long Lj2,long N)
 	{
 	long tmp;
 
-	tmp = delta+k1;
-	while (tmp<0) {
-		tmp += N;
-		} /* endwhile */
-	tmp %= N;
+	/* Fix 5: branchless modular reduction — was a while(tmp<0) loop.
+	 * N is always a power of 2 (N=1<<L) so this is always valid. */
+	tmp = ((delta+k1) % N + N) % N;
 	if (tmp>(N>>1)) {
 		tmp = N-tmp;
 		return(-(tmp>>Lj2));
@@ -1485,17 +1500,18 @@ void initValues(
 		/*
 		* initial values for Procedure 4
 		*/
-		/* compute f2_0 */
+		/* Fix 2: sincos() for f2_0 */
 		dtmp = cpi*(double)dp0*(double)dk0/(double)N;
-		f2_0[0] = cos(dtmp);
-		f2_0[1] = -sin(dtmp);
+		sincos(dtmp, &f2_0[1], &f2_0[0]);
+		f2_0[1] = -f2_0[1];
 		/*
 		* initial values for Procedure 4'
 		*/
 		/* compute f2_0 */
+		/* Fix 2: sincos() for fs2_0 */
 		dtmp = cpi*(double)dk0*(double)stepP/(double)N;
-		fs2_0[0] = cos(dtmp);
-		fs2_0[1] = -sin(dtmp);
+		sincos(dtmp, &fs2_0[1], &fs2_0[0]);
+		fs2_0[1] = -fs2_0[1];
 		}
 	else
 		{
@@ -1510,19 +1526,20 @@ void initValues(
 		/*
 		* initial values for Procedure 4
 		*/
-		/* compute f2_0 */
+		/* Fix 2: sincos() for f2_0 */
 		dtmp = (cpi*(double)dp0+
 			2.0*M_PI*(double)p1)*(double)dk0/(double)N;
-		f2_0[0] = cos(dtmp);
-		f2_0[1] = -sin(dtmp);
+		sincos(dtmp, &f2_0[1], &f2_0[0]);
+		f2_0[1] = -f2_0[1];
 		/*
 		* initial values for Procedure 4'
 		*/
 		/* compute f2_0 */
+		/* Fix 2: sincos() for fs2_0 */
 		dtmp = (cpi*(double)dp0+
 			2.0*M_PI*(double)p1)*(double)stepK/(double)N;
-		fs2_0[0] = cos(dtmp);
-		fs2_0[1] = -sin(dtmp);
+		sincos(dtmp, &fs2_0[1], &fs2_0[0]);
+		fs2_0[1] = -fs2_0[1];
 		}
 	}
 

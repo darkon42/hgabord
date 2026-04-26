@@ -1,189 +1,235 @@
 #include "mpp.h"
+#include <stdio.h>
+#include <string.h>
 
-//extern void change_gabsignal();
 extern void change_gabsignal(GABSIGNAL gabsignal, int size);
 
 /*
  * calculate a gabsignal created by the L2 normalized gaussian
  *
  * Inputs:
- * 	min_t	minimum value for t (double)
+ *	min_t	minimum value for t (double)
  *	max_t	maximum value for t (double)
  *	size_g	number of points in t need to be calculated (int)
- *	size_s  size of the gabsignal need to be created (int),
+ *	size_s	size of the gabsignal need to be created (int)
  *	sigma	the deviation for the gaussian
- * 
+ *
  * Remark:
- *	if size_s > size_g, then the gabsignal filled with zero for
- *	those points that index number greater than size_g
+ *	if size_s > size_g, then the gabsignal is filled with zero for
+ *	those indices greater than size_g.
  *
- * Bugs:
- *	size_s must be greater than size_g, if not return null pointer
+ * Returns NULL if size_s < size_g.
  *
+ * Fix 2: loop was `i <= size_g` (off-by-one, wrote size_g+1 values into
+ *        a size_s-element buffer when size_s == size_g). Changed to `<`.
  */
 GABSIGNAL Gaussian2Signal(double min_t,
-					   double max_t,
-					   double size_g,
-					   int size_s,
-					   double sigma)
+                           double max_t,
+                           double size_g,
+                           int    size_s,
+                           double sigma)
 {
-    GABSIGNAL gabsignal=(GABSIGNAL)NULL;
+    GABSIGNAL gabsignal;
     double t, scale;
     int i;
-	double gaussianL2(double t,double sigma);
-//    GABSIGNAL new_gabsignal();
+    double gaussianL2(double t, double sigma);
 
-    if (size_s < size_g)
-	return((GABSIGNAL)NULL);
+    if (size_s < (int)size_g)
+        return (GABSIGNAL)NULL;
 
     gabsignal = new_gabsignal(size_s);
-    scale = (double)(max_t-min_t)/(double)size_g;
-    gabsignal->scale = (double)scale;
+    if (gabsignal == (GABSIGNAL)NULL) {
+        fprintf(stderr, "Gaussian2Signal: new_gabsignal(%d) failed\n", size_s);
+        return (GABSIGNAL)NULL;
+    }
 
-    t = (double)min_t;
+    scale = (max_t - min_t) / size_g;
+    gabsignal->scale = scale;
+    t = min_t;
 
-    for (i=0;i<=(int)size_g;i++)
-	{
-	gabsignal->values[i] = gaussianL2(t,(double)sigma);
-	t += scale;
-	}
+    /* Fix 2: was `i <= (int)size_g` — off-by-one heap overwrite when
+     * size_s == size_g. The loop now writes exactly size_g values. */
+    for (i = 0; i < (int)size_g; i++) {
+        gabsignal->values[i] = gaussianL2(t, sigma);
+        t += scale;
+    }
 
-    return(gabsignal);
+    return gabsignal;
 }
 
 
-/**************************************/
-/* Copy a gabsignal in another           */
-/**************************************/
-
-/* copy an array of double ('input') of 
-   size 'sigsize' in another ('output') */
+/*--------------------------------------------------------------------------*/
+/*
+ * farray_copy — copy an array of doubles.
+ *
+ * Fix 5: replaced the hand-written pointer loop with memcpy, which the
+ * C library implements with SIMD on every modern platform.
+ */
 /*--------------------------------------------------------------------------*/
 void farray_copy(double *input, int sigsize, double *output)
 {
-  double *to, *from;
-
-  for (to=output,from = input; from < input+sigsize; to++, from++)
-		*to = *from;
+    memcpy(output, input, (size_t)sigsize * sizeof(double));
 }
+
 
 /*--------------------------------------------------------------------------*/
 /*
- * tranlate an array of double
+ * farray_translate — circular-shift an array of doubles by `shift` positions.
+ *
+ * Fix 1: perror() was used for the null check but doesn't stop execution;
+ *        replaced with fprintf+return.
+ *
+ * Fix 6: the original loop used `i % size` on every iteration and two
+ *        while-loops to normalise shift. Since i runs over exactly one
+ *        full period, the modulo wraps exactly once. We replace the whole
+ *        thing with two memcpy calls — no division, no branching.
+ *
+ *        Shift normalisation: ((shift % size) + size) % size maps any
+ *        integer shift into [0, size) in constant time.
  */
 /*--------------------------------------------------------------------------*/
-void farray_translate(double *f_in,double *f_out,int size,int shift)
+void farray_translate(double *f_in, double *f_out, int size, int shift)
 {
-    int i, i0, i1;
-    double *value;
+    int tail;
 
-    if (f_in == (double *)NULL || f_out == (double *)NULL)
-	perror("farray_translate(): null input!");
+    if (f_in == NULL || f_out == NULL) {
+        fprintf(stderr, "farray_translate(): null input!\n");
+        return;
+    }
 
-    while (shift < 0)
-	shift += size;
-    while (shift-size>0)
-	shift -= size;
-    i0 = size-shift;
-    i1 = i0+size;
-    value = f_out;
-    for (i=i0;i<i1;i++)
-	*value++ = f_in[i%size];
+    /* Fix 6: branchless normalisation replaces two while loops */
+    shift = ((shift % size) + size) % size;
+
+    if (shift == 0) {
+        memcpy(f_out, f_in, (size_t)size * sizeof(double));
+        return;
+    }
+
+    /* The translated array is: f_in[size-shift .. size-1] ++ f_in[0 .. size-shift-1]
+     * i.e. two contiguous chunks — no per-element modulo needed. */
+    tail = size - shift;
+    memcpy(f_out,        f_in + tail, (size_t)shift * sizeof(double));
+    memcpy(f_out + shift, f_in,       (size_t)tail  * sizeof(double));
 }
 
-/*--------------------------------------------------------------------------*/
-/* Signal Copy */
-/*--------------------------------------------------------------------------*/
-int sig_copy(GABSIGNAL input,GABSIGNAL output)
-{
-  int i;
-
-  if (input == (GABSIGNAL)NULL || output == (GABSIGNAL)NULL)
-	perror("sig_copy(): null input!");
-
-  change_gabsignal(output,input->size);
-
-  for(i=0;i<input->size;i++)
-    output->values[i] = input->values[i];
-  output->scale = input->scale;
-  output->shift = input->shift;
-  output->firstp = input->firstp;
-  output->lastp = input->lastp;
-  output->param = input->param;
-  
-  return(0);
-}
 
 /*--------------------------------------------------------------------------*/
 /*
- * gabsignal copy from range min to max
+ * sig_copy — copy a GABSIGNAL into another.
+ *
+ * Fix 1: perror() doesn't stop execution; replaced with fprintf+return.
+ * Fix 7: element-by-element copy replaced with memcpy.
  */
 /*--------------------------------------------------------------------------*/
-int sig_range_copy(GABSIGNAL input,GABSIGNAL output,int min,int max)
+int sig_copy(GABSIGNAL input, GABSIGNAL output)
 {
-  int i, size;
-  double *value;
+    if (input == (GABSIGNAL)NULL || output == (GABSIGNAL)NULL) {
+        fprintf(stderr, "sig_copy(): null input!\n");
+        return -1;
+    }
 
-  if (input == (GABSIGNAL)NULL || output == (GABSIGNAL)NULL)
-	perror("sig_range_copy(): null input!");
-  if (min<0 || max<min || max>input->size)
-	perror("sig_range_copy(): illegal argument!");
+    change_gabsignal(output, input->size);
 
-  size = max-min;
-  if (output->size != size)
-	change_gabsignal(output,size);
+    /* Fix 7: was a manual element loop — memcpy is SIMD-optimised */
+    memcpy(output->values, input->values, (size_t)input->size * sizeof(double));
 
-  value = output->values;
-  for (i=min;i<max;i++)
-	*value++ = input->values[i];
-  output->scale = input->scale;
-  output->shift = input->shift;
-  output->firstp = min;
-  output->lastp = max-1;
-  output->param = input->param;
-  
-  return(0);
+    output->scale  = input->scale;
+    output->shift  = input->shift;
+    output->firstp = input->firstp;
+    output->lastp  = input->lastp;
+    output->param  = input->param;
+
+    return 0;
 }
-
 
 
 /*--------------------------------------------------------------------------*/
 /*
- * append a word into book
+ * sig_range_copy — copy a sub-range [min, max) of a GABSIGNAL.
+ *
+ * Fix 1: perror() doesn't stop execution; replaced with fprintf+return.
+ * Fix 3: the bounds check used input->size after a null check that didn't
+ *        return, so a NULL input would have crashed on the second check.
+ *        Now there is a single guarded block: return before any dereference.
+ * Fix 8: element-by-element copy replaced with memcpy.
+ */
+/*--------------------------------------------------------------------------*/
+int sig_range_copy(GABSIGNAL input, GABSIGNAL output, int min, int max)
+{
+    int size;
+
+    /* Fix 3: all guard checks before any dereference */
+    if (input == (GABSIGNAL)NULL || output == (GABSIGNAL)NULL) {
+        fprintf(stderr, "sig_range_copy(): null input!\n");
+        return -1;
+    }
+    if (min < 0 || max < min || max > input->size) {
+        fprintf(stderr, "sig_range_copy(): illegal argument"
+                        " (min=%d max=%d size=%d)\n", min, max, input->size);
+        return -1;
+    }
+
+    size = max - min;
+    if (output->size != size)
+        change_gabsignal(output, size);
+
+    /* Fix 8: was a manual element loop — memcpy is SIMD-optimised */
+    memcpy(output->values, input->values + min, (size_t)size * sizeof(double));
+
+    output->scale  = input->scale;
+    output->shift  = input->shift;
+    output->firstp = min;
+    output->lastp  = max - 1;
+    output->param  = input->param;
+
+    return 0;
+}
+
+
+/*--------------------------------------------------------------------------*/
+/*
+ * BookAppend — append a WORD to a BOOK.
+ *
+ * Fix 4: perror() doesn't stop execution; a NULL book or word would have
+ *        caused a segfault or silent corruption on the very next line.
+ *        Now returns immediately on bad input.
  */
 /*--------------------------------------------------------------------------*/
 void BookAppend(BOOK book, WORD word)
 {
-/* checking the inputs */
+    if (book == NULL || word == NULL) {
+        fprintf(stderr, "BookAppend: NULL input\n");
+        return;
+    }
 
-if ( book == NULL || word == NULL )
-	perror("BookAppend: NULL input");	
+    if (book->last == NULL) {
+        book->first = word;
+        book->last  = word;
+    } else {
+        book->last->next = word;
+        book->last       = word;
+    }
 
-
-  if(book->last == NULL) {
-    book->first = word;
-    book->last = book->first;
-  }
-  else {
-    book->last->next = word;
-    book->last = book->last->next;
-  }
-  book->size = book->size + 1;
-  book->energy += word->coeff*word->coeff;
+    book->size   += 1;
+    book->energy += word->coeff * word->coeff;
 }
+
+
+/*--------------------------------------------------------------------------*/
+/* Utility wrappers                                                          */
+/*--------------------------------------------------------------------------*/
 
 void error(char *str)
 {
-perror(str);
+    fprintf(stderr, "%s\n", str);
 }
 
 void error_option(char *str)
 {
-perror("Option error\n");
+    fprintf(stderr, "Option error: %s\n", str);
 }
 
 void warning(char *str)
 {
-   printf("%s", str);
+    fprintf(stderr, "Warning: %s\n", str);
 }
-

@@ -69,7 +69,7 @@ GABSIGNAL cur_gabsignal;
 /* current gabsignal size */
 int cur_sig_size=0;
 /* filters */
-GABSIGNAL * filter[MAX_NUM_SB];
+GABSIGNAL *filter[MAX_NUM_SB];
 /* current filter type */
 int filter_type[MAX_NUM_SB];
 /* shift octave and subsample octave */
@@ -93,7 +93,7 @@ double epslonG=1.0e-15;         /* threshold for the Gaussian fuctions */
 
 int cpct=0, citer=0, cth=0, ccoh=0; /* all criteria disabled*/
 double th_pct;                      /* criterion for terminate analysis based on prct of NRJ */
-int max_num_iter;                   /*  idem by number of atoms*/
+int max_num_iter=500;                   /*  idem by number of atoms*/
 double thatomnrj, last_atom_nrj;    /* threshold of atoms energy and last atoms added nrj */
 
 /***************************************************************************************************************************/
@@ -221,7 +221,7 @@ double *gabord(double *data, int SigSize, int *booksize)
 	for (i=0; i<SigSize; i++) gabsignal->values[i]=data[i];
 
 	sig_add_num(gabsignal, -1*sig_mean(gabsignal));                       /* substract mean to center around zero*/
-
+																			/* should try the median to alleviate artifacts effects */
 	orgN = (double) gabsignal->size;
 	sigN = gabsignal->size;
 	LnSigSize = find2power(gabsignal->size);
@@ -422,6 +422,7 @@ double *gabord(double *data, int SigSize, int *booksize)
 
 
 	res_n1 = 0.0;
+	//printf("NRJ of the signal: %f\n", SigEng);
 	last_atom_nrj = SigEng;                             /* to pass the first test : add xtof*/
 
 	//printf("Max Iter. = %d\n", max_num_iter);
@@ -459,7 +460,8 @@ double *gabord(double *data, int SigSize, int *booksize)
 		res_n1 = res_n - last_atom_nrj;
 
 	}
-
+	printf("Iteration: %d - NRJ: %f\n", iter, last_atom_nrj);
+	
 	book = cur_book;
 	*booksize=book->size;
 	Fbook=(double *)malloc(5*book->size*sizeof(double));
@@ -500,36 +502,57 @@ int main()
 	
 	extern void delete_gabsignal(GABSIGNAL gabsignal);
 	extern FILTER *GaborFreeFilter(FILTER*, int);
+	extern void GaborOperCleanup(void);
 
 	data = (double*) malloc(DATAARRAY_SIZE*sizeof(double));
 	if (data==NULL) {		fprintf(stderr, "alloc error\n");		return(1);	}
 
-    int arr[DATAARRAY_SIZE];
-    srand(time(0));
-	 for (i = 0; i < DATAARRAY_SIZE; i++)
-    {
-        data[i] = rand();
-		//printf("data[%d]=%f\n", i, data[i]);
-    }
+	//Replacing random numbers with reading EEG data from data.bin file
+	FILE *fp=fopen("data.bin","rb");
+	if (!fp) {
+		perror("fopen");
+		return 1;
+	}
+	/*Determine file size*/
+	fseek(fp,0,SEEK_END);
+	long filesize=ftell(fp);
+	rewind(fp);
 	
-	// generate random data for testing purpose
-	//for (int i = 0; i < n; i++) {
-	//	data[i] = srand(time(&current_time))/(double)RAND_MAX;
-	//	printf("data[%d]=%f\n", i, data[i]);
-	//}
+	size_t nbdata= filesize/sizeof(double);
+	
+	size_t nread=fread(data, sizeof(double), nbdata, fp);
+	
+	if (nread != nbdata) {
+		fprintf(stderr, "Read error\n");
+		free(data);
+		return 1;
+	}
+	
+	// Generate a random data set
+    //int arr[DATAARRAY_SIZE];
+    //srand(time(0));
+	// for (i = 0; i < DATAARRAY_SIZE; i++) data[i] = (rand() % 100);
+		
+	//printf("Data point:");
+	//for (i=0;i<5;i++) printf("%f,", data[i]);
+	//printf("\n");
 
 	cth=1; 
 	ccoh=0; 
 	cpct=0; 
-	citer=0;
+	citer=500;
 	thatomnrj=threshold;
-	max_num_iter=10000; 
-
+		
 	bookB=gabord(data, DATAARRAY_SIZE, &bsize);
-
-	printf("Computation completed!\n");
-
+	for (i=1;i<=2;i++) {
+		printf("Atom %d: Oct=%2.0f, ID=%2.0f, Pos.=%4.0f, Freq.=%f, Phase=%1.3f\n", 
+		i, bookB[5*(i-1)+0],bookB[5*(i-1)+1],bookB[5*(i-1)+2],bookB[5*(i-1)+3],bookB[5*(i-1)+4]);  
+	}
 	free(bookB);
+	
+	printf("\nComputation completed!\n");
+
+	//free(bookB);
 	free(data);
 
 	// releasing pointers
@@ -564,6 +587,7 @@ int main()
 	free(pfCE2);
 	free(pfCE3);
 
+	GaborOperCleanup();
 
 	return(0);
 

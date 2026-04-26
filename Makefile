@@ -32,7 +32,7 @@ APP_MIME_SIG =
 #	means this Makefile will not work correctly if two source files with the
 #	same name (source.c or source.cpp) are included from different directories.
 #	Also note that spaces in folder names do not work well with this Makefile.
-SRCS = addons.c fft.c gb_bkold.c gb_corr.c gb_filter.c math.c sig_fct10.c update.c complex_op.c gabord.c gb_buildbook.c gb_decomp.c gb_oper.c sig_alloc.c struct_alloc.c
+SRCS = addons.c gb_bkold.c gb_corr.c gb_filter.c math.c sig_fct10.c update.c complex_op.c gabord.c gb_buildbook.c gb_decomp.c gb_oper.c sig_alloc.c struct_alloc.c
 
 #	Specify the resource definition files to use. Full or relative paths can be
 #	used.
@@ -58,7 +58,7 @@ RSRCS =
 #	- 	if your library does not follow the standard library naming scheme,
 #		you need to specify the path to the library and it's name.
 #		(e.g. for mylib.a, specify "mylib.a" or "path/mylib.a")
-LIBS = m
+LIBS = m fftw3
 
 #	Specify additional paths to directories following the standard libXXX.so
 #	or libXXX.a naming scheme. You can specify full paths or paths relative
