@@ -147,12 +147,15 @@ void GaborUpdateFourier(GABSIGNAL *trans, FILTER *filter, WORD word,
             coeff = -coeff / sqrtN;
         else
             coeff /= sqrtN;
-        for (k2 = 0; k2 < N; k2++)
-            {
-            index1 = (k2 * p1) % N;
-            *v1r++ -= coeff * v2r[index1];
-            *v1i++ += coeff * v2i[index1];
-            }
+			
+		double *v1r0 = v1r, *v1i0 = v1i;                                                                                                                                                             
+		//#pragma omp parallel for private(index1)                  
+		  for (k2 = 0; k2 < N; k2++)              
+			  {                                                                                                                                                                                        
+			  index1 = (k2 * p1) % N;
+			  v1r0[k2] -= coeff * v2r[index1];                                                                                                                                                         
+			  v1i0[k2] += coeff * v2i[index1];                      
+			  }    
         }
     else if (j1 == L)
         {
@@ -175,6 +178,9 @@ void GaborUpdateFourier(GABSIGNAL *trans, FILTER *filter, WORD word,
         v2i = v2r + N;
         vg  = filter[L - j1]->values;
 
+		double *v1r0 = v1r, *v1i0 = v1i;
+		//#pragma omp parallel for private(index1, index2, tmp)
+
         for (k2 = 0; k2 < N; k2++)
             {
             double cr, ci;
@@ -194,8 +200,10 @@ void GaborUpdateFourier(GABSIGNAL *trans, FILTER *filter, WORD word,
                 tmp *= coeff;
                 /* Fix 4: cmul() replaces back-to-back CMREAL/CMIMAGINARY */
                 cmul(v2r[index2], -v2i[index2], cosPhi, sinPhi, &cr, &ci);
-                *v1r -= tmp * cr;
-                *v1i -= tmp * ci;
+                //*v1r -= tmp * cr;
+                //*v1i -= tmp * ci;
+				v1r0[k2] -= tmp * cr;
+				v1i0[k2] -= tmp * ci;  
                 }
 
             /* Second term: k2 + k1 */
@@ -213,12 +221,15 @@ void GaborUpdateFourier(GABSIGNAL *trans, FILTER *filter, WORD word,
                 tmp *= coeff;
                 /* Fix 4: cmul() — note conjugate sinPhi for second term */
                 cmul(v2r[index2], -v2i[index2], cosPhi, -sinPhi, &cr, &ci);
-                *v1r -= tmp * cr;
-                *v1i -= tmp * ci;
+				
+				v1r0[k2] -= tmp * cr;
+				v1i0[k2] -= tmp * ci;
+                //*v1r -= tmp * cr;
+                //*v1i -= tmp * ci;
                 }
 
-            v1r++;
-            v1i++;
+            //v1r++;
+            //v1i++;
             }
         }
 }

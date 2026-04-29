@@ -14,12 +14,14 @@
 #define structh
 
 #include "mpp.h"
-#include "structpath.h"
 #include "cwt1d.h"
 
 #include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#include <fftw3.h>
+#include <omp.h>
 
 #ifdef __unix__
     #include <sys/types.h>
@@ -37,6 +39,8 @@
 double *values=(double *)NULL;          /*values of gabsignal (temp var.) */
 
 GABSIGNAL gabsignal=(GABSIGNAL)NULL;             /*gabsignal*/
+// in global scope at top of gabord.c, alongside gabsignal:
+GABSIGNAL sigtmp = (GABSIGNAL)NULL;
 
 double *cur_norm;         /* = (double *)NULL;*/
 
@@ -119,7 +123,7 @@ double *gabord(double *data, int SigSize, int *booksize)
 	WORD word;                                                                              /*temp word from the book*/
 	INDEX indx;                                                                             /*temp index from the word*/
 
-	GABSIGNAL sigtmp=(GABSIGNAL)NULL;             /*gabsignal temp for decomp.*/
+	//GABSIGNAL sigtmp=(GABSIGNAL)NULL;             /*gabsignal temp for decomp.*/
 
 	/*DECLARATIONS FROM GBUILDBOOK*/
 
@@ -139,7 +143,7 @@ double *gabord(double *data, int SigSize, int *booksize)
 	/* EXTERNAL FUNCTIONS*/
 
 	extern FILTER *GaborBuildFilter(int, int, double, double**), *GaborFreeFilter(FILTER*, int);
-	extern double log2();
+	//extern double log2();
 	extern GABSIGNAL *GaborDecomp(GABSIGNAL*,GABSIGNAL, FILTER*,int,int, int, int, int);
 	extern void change_gabsignal(GABSIGNAL, int);
 	extern void sig_add_num(GABSIGNAL, double);
@@ -157,6 +161,8 @@ double *gabord(double *data, int SigSize, int *booksize)
 	extern WORD WordListFree(WORD);
 	extern void GaborBuildBook(GABSIGNAL*,FILTER*,BOOK,int,int,int,int, int, int, int, int*, double*, double*,double*, double*, double*);
 	extern void GaborBuildBookOld();
+	
+	extern void delete_gabsignal(GABSIGNAL gabsignal);
 
 	extern int find2power(int);
 	extern void farray_copy(double*, int, double*);
@@ -173,37 +179,51 @@ double *gabord(double *data, int SigSize, int *booksize)
 
 /* initializations     from int_loop.c  */
 
-	for ( sb_index = 0; sb_index < MAX_NUM_SB; sb_index++) {
-		filter[sb_index] = (GABSIGNAL *) NULL;
-		num_filter[sb_index] = 0;
-		TransAlloc[sb_index] = 0;
-		filter_type[sb_index] = -1;
+ /* Fix F: only initialise globals on first call.
+ * Previously this block ran unconditionally, discarding filter[] pointers
+ * without freeing them and re-allocating library/gabsignals/temporary
+ * on every call to gabord(). */
+	static int gabord_initialised = 0;
+
+	if (!gabord_initialised) {
+		for (sb_index = 0; sb_index < MAX_NUM_SB; sb_index++) {
+			filter[sb_index]      = (GABSIGNAL *)NULL;
+			num_filter[sb_index]  = 0;
+			TransAlloc[sb_index]  = 0;
+			filter_type[sb_index] = -1;
+		}
+		/* allocation of book */
+		for (i = 0; i < MAX_NUM_SB; i++) {
+			library[i]     = AllocBook();
+			library[i]->id = i;
+		}
+		/* allocation of gabsignals  */
+		for (i = 0; i < MAX_NUM_GABSIGNAL; i++)
+			gabsignals[i] = new_struct_gabsignal();
+
+		old_cur_book   = cur_book;
+		/* assign the current gabsignal */
+		cur_gabsignal  = gabsignals[0];
+		temporary      = new_struct_gabsignal();
+		old_cur_filter = filter[0];
+		Current_Book   = 0;
+
+		gabord_initialised = 1;
+	} else {
+		/* On repeat calls: clear the book from the previous run so it's
+		 * ready to receive new atoms, but keep filter/transform intact. */
+		if (cur_book != (BOOK)NULL) {
+			clear_book(cur_book);
+			init_book(cur_book);
+		}
 	}
-/* allocation of book */
-	for (i=0; i<MAX_NUM_SB; i++)
-	{
-		library[i] = AllocBook();
-		library[i]->id=i;
-	}
-/* allocation of gabsignals  */
-	for (i=0; i<MAX_NUM_GABSIGNAL; i++)
-		gabsignals[i] = new_struct_gabsignal();
 
-	/*cur_book = library[0];*/
-	old_cur_book = cur_book;
-
-/* assign the current gabsignal */
-	cur_gabsignal = gabsignals[0];
-
-	temporary = new_struct_gabsignal();
-	old_cur_filter = filter[0];
-	Current_Book = 0;
-
-/* Others init*/
-	//ds = (short int *)malloc(sizeof(short int));
-	//df = (double *)malloc(sizeof(double));
-
+	//Added to prevent re-init w/o free on recall
+	if (gabsignal != (GABSIGNAL)NULL)
+		delete_gabsignal(gabsignal);
+	
 	gabsignal = new_gabsignal((int)SigSize);
+	
 	Lnlndata = find2power(lndata);
 	lndata = 1<<Lnlndata;
 
@@ -240,16 +260,21 @@ double *gabord(double *data, int SigSize, int *booksize)
 	SigSize = ((long long)(1))<<LnSigSize;
 	if (SigSize != sigN)                                                   /* gabsignal resize to a power of 2*/
 	{
-		values=(double *)malloc(sizeof(double)*sigN);
-		if (values  ==(double *)NULL)
-			perror("GDecomp(): mem. alloc. failed!");
-		farray_copy(gabsignal->values,sigN,values);
-		change_gabsignal(gabsignal,(int)SigSize);
-		for (i=0; i<sigN; i++)
+		values = (double *)malloc(sizeof(double) * sigN);
+		if (values == (double *)NULL) {
+			fprintf(stderr, "gabord(): malloc failed for temp buffer\n");
+			delete_gabsignal(gabsignal);
+			gabsignal = (GABSIGNAL)NULL;
+			return (double *)NULL;
+		}
+		farray_copy(gabsignal->values, sigN, values);
+		change_gabsignal(gabsignal, (int)SigSize);
+		for (i = 0; i < sigN; i++)
 			gabsignal->values[i] = values[i];
-		for (i=(long)SigSize; i<((long)sigN); i++)
+		for (i = (long)sigN; i < (long)SigSize; i++)
 			gabsignal->values[i] = 0.0;
-		free((char *)values);
+		free(values);
+		values = (double *)NULL;
 		sigN = (int)SigSize;
 	}
 
@@ -276,11 +301,16 @@ double *gabord(double *data, int SigSize, int *booksize)
 			cur_transform = GaborFreeFilter(cur_transform, cur_TransAlloc);
 	}
 
+	/* Fix B: load wisdom before plan creation - to speed FFTW*/
+	fftw_import_wisdom_from_filename("fftw_wisdom.dat");
+	
 	if (cur_filter == (FILTER *)NULL)
 	{
 		cur_filter = GaborBuildFilter( LnSigSize, SigSize, sigma,&cur_norm);
 		cur_num_filter = LnSigSize+1;
 		cur_filter_type = NEWGABOR;
+		/* Fix B: save plans for next run — skips benchmarking on repeat calls */
+		fftw_export_wisdom_to_filename("fftw_wisdom.dat");
 	}
 
 	/* Do the decomposition */
@@ -289,9 +319,9 @@ double *gabord(double *data, int SigSize, int *booksize)
 		sigtmp = new_gabsignal(SigSize<<1);
 	else if (sigtmp->size != SigSize)
 		change_gabsignal(sigtmp,SigSize<<1);
-
-	for (i=0; i<SigSize; i++)
-		sigtmp->values[i] = gabsignal->values[i];
+		
+	//for (i=0; i<SigSize; i++) sigtmp->values[i] = gabsignal->values[i]; % being replace by memcpy
+	memcpy(sigtmp->values, gabsignal->values, (size_t)SigSize * sizeof(double));
 
 	cur_transform = GaborDecomp(cur_transform,sigtmp,cur_filter,
 	                            SubsampleOctaveTime,SubsampleOctaveFreq,
@@ -336,36 +366,39 @@ double *gabord(double *data, int SigSize, int *booksize)
 	cur_book->sig_size = sigN;
 	cur_book->type = NEWGABOR;
 
-	if (find2power(cur_sig_size)!=nL)
+
+	if (find2power(cur_sig_size) != nL)
 	{
 		nL = find2power(cur_sig_size);
-		if (pnAep!=(int *)NULL)
-		{
+		if (pnAep != (int *)NULL) {
 			free((char *)pnAep);
 			pnAep = (int *)NULL;
 		}
-		if (pnIep!=(int *)NULL)
-		{
+		if (pnIep != (int *)NULL) {
 			free((char *)pnIep);
 			pnIep = (int *)NULL;
 		}
-		if (pfG!=(double *)NULL)
-		{
+		if (pfG != (double *)NULL) {
 			free((char *)pfG);
-			pfG=(double *)NULL;
+			pfG = (double *)NULL;
 		}
-		if (pfCE1!=(double *)NULL)
-		{
+		if (pfCE1 != (double *)NULL) {
 			free((char *)pfCE1);
-			pfCE1=(double *)NULL;
+			pfCE1 = (double *)NULL;
 		}
-		if (pfC!=(double *)NULL)
-		{
+		if (pfCE2 != (double *)NULL) {       /* Fix 6: was missing */
+			free((char *)pfCE2);
+			pfCE2 = (double *)NULL;
+		}
+		if (pfCE3 != (double *)NULL) {       /* Fix 6: was missing */
+			free((char *)pfCE3);
+			pfCE3 = (double *)NULL;
+		}
+		if (pfC != (double *)NULL) {
 			free((char *)pfC);
-			pfC=(double *)NULL;
+			pfC = (double *)NULL;
 		}
-		if (pfB!=(double *)NULL)
-		{
+		if (pfB != (double *)NULL) {
 			free((char *)pfB);
 			pfB = (double *)NULL;
 		}
@@ -395,8 +428,10 @@ double *gabord(double *data, int SigSize, int *booksize)
 				pnIep = (int *)malloc(sizeof(int)*nL);
 			if (pnAep==(int *)NULL)
 				pnAep = (int *)malloc(sizeof(int)*nL);
-			if (pnAep==(int *)NULL || pnIep==(int *)NULL)
+			if (pnAep==(int *)NULL || pnIep==(int *)NULL) {
 				perror("mem. alloc. failed!");
+				return NULL;
+				}
 			GaborGetNAep(nL,maxlh,epslon,pnAep,pnIep);
 			pfG = GaborGetGaussianArray(nL,pnAep,pnIep[nL-1],maxlh);
 		}
@@ -460,7 +495,7 @@ double *gabord(double *data, int SigSize, int *booksize)
 		res_n1 = res_n - last_atom_nrj;
 
 	}
-	printf("Iteration: %d - NRJ: %f\n", iter, last_atom_nrj);
+	//printf("Iteration: %d - NRJ: %f\n", iter, last_atom_nrj);
 	
 	book = cur_book;
 	*booksize=book->size;
@@ -479,8 +514,10 @@ double *gabord(double *data, int SigSize, int *booksize)
 		nib++;
 		word=word->next;
 	}
-
+	//double GAD=(double)(2.0*nib/SigSize);
+	//printf("GAD=%15.10f\n", GAD);
 	
+	//delete_gabsignal(sigtmp);
 
 /*OUPUT BOOK*/
 	return Fbook;
@@ -495,7 +532,9 @@ int main()
 	int bsize;
 	double threshold=10;
 	double *bookB;
-	int n, i;
+	int n, i, j;
+	
+	 omp_set_num_threads(4);
 
 	//int m=1024;
 	double *data = NULL;
@@ -528,6 +567,8 @@ int main()
 		return 1;
 	}
 	
+	fclose(fp);
+	
 	// Generate a random data set
     //int arr[DATAARRAY_SIZE];
     //srand(time(0));
@@ -537,18 +578,20 @@ int main()
 	//for (i=0;i<5;i++) printf("%f,", data[i]);
 	//printf("\n");
 
-	cth=1; 
+	cth=0; 
 	ccoh=0; 
 	cpct=0; 
 	citer=500;
 	thatomnrj=threshold;
-		
-	bookB=gabord(data, DATAARRAY_SIZE, &bsize);
-	for (i=1;i<=2;i++) {
+	for (j=0;j<100;j++)	
+		{
+		bookB=gabord(data, DATAARRAY_SIZE, &bsize);
+	/*for (i=1;i<=10;i++) {
 		printf("Atom %d: Oct=%2.0f, ID=%2.0f, Pos.=%4.0f, Freq.=%f, Phase=%1.3f\n", 
 		i, bookB[5*(i-1)+0],bookB[5*(i-1)+1],bookB[5*(i-1)+2],bookB[5*(i-1)+3],bookB[5*(i-1)+4]);  
-	}
-	free(bookB);
+	}*/
+		free(bookB);
+		}
 	
 	printf("\nComputation completed!\n");
 
@@ -561,6 +604,7 @@ int main()
 
 	for (i=0; i<MAX_NUM_SB; i++)
 	{
+		clear_book(library[i]);
 		free(library[i]);
 	}
 	
@@ -568,8 +612,7 @@ int main()
 	free(pfC);
 	free(pfG);
 
-	for (i=0; i<MAX_NUM_GABSIGNAL; i++)
-		delete_gabsignal(gabsignals[i]);
+	for (i=0; i<MAX_NUM_GABSIGNAL; i++)	delete_gabsignal(gabsignals[i]);
 		
 
 	for (i=0; i<MAX_NUM_SB; i++)
@@ -582,10 +625,13 @@ int main()
 	
 	delete_gabsignal(temporary);
 	delete_gabsignal(gabsignal);
+	//delete_gabsignal(sigtmp);
 
 	free(pfCE1);
 	free(pfCE2);
 	free(pfCE3);
+
+	free(cur_norm);
 
 	GaborOperCleanup();
 

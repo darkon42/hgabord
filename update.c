@@ -88,14 +88,14 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 	/*
 	* local variables for the complex exponential
 	*/
-	static double f1_0[2];   /* $f_1(\delta,0,0)$ where $\delta=\delta k_0$
+	double f1_0[2];   /* $f_1(\delta,0,0)$ where $\delta=\delta k_0$
 							 * or $\delta p_0$
 							 */
-	static double f2_0[2];   /* $f_2(\delta,\delta,0)$ where $\delta=\delta p_0$
+	double f2_0[2];   /* $f_2(\delta,\delta,0)$ where $\delta=\delta p_0$
 							 * or $\delta k_0$
 							 */
-	static double fs2_0[2];  /* $f_2(step,\delta,0)$ */
-	static double f3_0[2];   /* $f_3(step,0)$ where $step=stepP$ or $stepK$ */
+	double fs2_0[2];  /* $f_2(step,\delta,0)$ */
+	double f3_0[2];   /* $f_3(step,0)$ where $step=stepP$ or $stepK$ */
 	/*
 	* local variables for parameters
 	*/
@@ -299,8 +299,17 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 	* case 3: the selected word is Gabor
 	*/
 	/* Fix 2: sincos() for the 2*phi pair */
-	sincos(2.0*phi, &sin_2phi, &cos_2phi);
-	for ( j2=MinOctave; j2<= MaxOctave; j2++)
+	
+	// Testing OpenMP parallelization
+	sincos(2.0*phi, &sin_2phi, &cos_2phi);                                                                                                                                                       
+	#pragma omp parallel for schedule(dynamic) \
+		private(n,Lj2,minj,minLj,l2,h2,stepP,stepK,A,B,dp0,dk0, \
+              dkZero,dpZero,ntmp,dpMaxP,dkMaxP,dpMaxN,dkMaxN, \
+              C,flag,dkFirst,cpi,f1_0,f2_0,fs2_0,f3_0)                                                                                                                                         
+	for ( j2=MinOctave; j2<= MaxOctave; j2++)  
+	
+	//sincos(2.0*phi, &sin_2phi, &cos_2phi);
+	//for ( j2=MinOctave; j2<= MaxOctave; j2++)
 		{
 		/* compute the parameters */
 		n = abs(j2-j1);
@@ -589,26 +598,26 @@ void genericLoop(GABSIGNAL *trans,
 	* variables for the complex exponential
 	*/
 	/* $f_4(\delta,0)$ where $\delta=\delta k_0$ or $\delta p_0$ */
-	static double f4_0[2];
-	static double f6[2];     /* f_6 */
-	static double f7[2];     /* $f_7(step)$ where $step=stepP$ or $stepK$ */
+	double f4_0[2];
+	double f6[2];     /* f_6 */
+	double f7[2];     /* $f_7(step)$ where $step=stepP$ or $stepK$ */
 	/* $f_8(\delta,step)$ where $\delta=\delta P_0$ or
 	* $\delta k_0$ and $step=stepP$ or $stepK$
 	*/
-	static double f8[2];
-	static double fs8[2];    /* $f_8(step,step)$ */
+	double f8[2];
+	double fs8[2];    /* $f_8(step,step)$ */
 	/* $f_9(\delta)$ where $\delta=\delta p_0$ or $\delta k_0$ */
-	static double f9[2];
-	static double fs9[2];    /* $f_9(step) $ */
+	double f9[2];
+	double fs9[2];    /* $f_9(step) $ */
 	/* $f1(\delta,m,q)$ where $\delta=\delta k_0$ or $\delta p_0$ */
-	static double f1[mqMax2][mqMax4];
+	double f1[mqMax2][mqMax4];
 	/* $f_2(\delta p,\delta k,q)$ or $f_2(\delta k,\delta p,m$ */
-	static double f2[mqMax4];
+	double f2[mqMax4];
 	/* initial $f_2(\delta p_0,\delta k,q)$ or $f_2(\delta k_0,\delta p,m)$ */
-	static double f20[mqMax4];
-	static double fs2[mqMax4]; /* $f_2(step,\delta,q)$ */
-	static double f3[mqMax4]; /* $f_3(stepK,m)$ or $f_3(stepP,q)$ */
-	static double f4[mqMax4]; /* $f_4(\delta k_0,q)$ or $f_4(\delta p_0,m)$ */
+	double f20[mqMax4];
+	double fs2[mqMax4]; /* $f_2(step,\delta,q)$ */
+	double f3[mqMax4]; /* $f_3(stepK,m)$ or $f_3(stepP,q)$ */
+	double f4[mqMax4]; /* $f_4(\delta k_0,q)$ or $f_4(\delta p_0,m)$ */
 	/*
 	* local variables for the Gaussian
 	*/
@@ -616,12 +625,12 @@ void genericLoop(GABSIGNAL *trans,
 	* $e^{-\pi\frac{(\delta p+mN)^2}{A}}$ or
 	* $e^{-\pi\frac{(\delta k+qN)^2}{B}}$
 	*/
-	static double vg[mqMax2];
+	double vg[mqMax2];
 	/*
 	* $e^{-\pi\frac{(\delta p+mN)^2}{A}}$ or
 	* $e^{-\pi\frac{(\delta k+qN)^2}{B}}$
 	*/
-	static double gauss, gx;
+	double gauss, gx;
 	/*
 	* local variables for parameters
 	*/

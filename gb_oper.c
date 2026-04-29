@@ -140,54 +140,84 @@ WORD GaborGetMaxFrmTrans(GABSIGNAL *trans, FILTER *filter,
         MaxNorm   = 1.0;
     }
 
-    /* The Gabor basis: j = MinOctave..MaxOctave */
-    for (j = MinOctave; j <= MaxOctave; j++) {
-        /* Fix 3: perror() → fprintf+return NULL */
-        if (trans[j - MinOctave + 1] == (GABSIGNAL)NULL) {
-            fprintf(stderr,
-                    "GaborGetMaxFrmTrans(): trans[%d] is null!\n",
-                    j - MinOctave + 1);
-            return (WORD)NULL;
-        }
-        if (j > LnSigSize - SubsampleOctaveFreq) {
-            kend        = 1 << (LnSigSize-1);
-            bndBadK     = 1 << (LnSigSize-j);
-            SampleRate_f = 1;
-        } else {
-            kend        = 1 << (SubsampleOctaveFreq+j-2);
-            bndBadK     = 1 << (SubsampleOctaveFreq-1);
-            SampleRate_f = 1 << (LnSigSize-SubsampleOctaveFreq-j+1);
-        }
-        if (j >= SubsampleOctaveTime) {
-            n_length    = SigSize >> (j-SubsampleOctaveTime+1);
-            n_2_length  = n_length << 1;
-            SampleRate_n = 1 << (j-SubsampleOctaveTime+1);
-        } else {
-            n_length    = SigSize;
-            n_2_length  = DoubleSigSize;
-            SampleRate_n = 1;
-        }
-        pointer = trans[j - MinOctave + 1]->values;
-        for (k = 0; k <= kend; k++) {
-            if ((k < bndBadK && k > 0) || (k > (kend-bndBadK) && k < kend)) {
-                pointer += n_2_length;
+    /* The Gabor basis: j = MinOctave..MaxOctave — parallel over octaves.
+     * Each j reads from a distinct trans[j] slot; per-j maxima are stored
+     * in flat arrays and merged serially after the parallel section.
+     * 32 entries is more than any realistic LnSigSize. */
+    {
+        double jmod[32], jfreq[32], jtrnsl[32], jreal[32], jimg[32];
+        int    jnull[32];
+        int    ji, nOct = MaxOctave - MinOctave + 1;
+
+        #pragma omp parallel for schedule(static) \
+            private(k, kend, SampleRate_f, SampleRate_n, freq, bndBadK, \
+                    n_length, n_2_length, modula, value_r, value_i, index, pointer)
+        for (j = MinOctave; j <= MaxOctave; j++) {
+            int lji = j - MinOctave;
+            jmod[lji]   = 0.0;  jfreq[lji]  = 0.0;
+            jtrnsl[lji] = 0.0;  jreal[lji]  = 0.0;
+            jimg[lji]   = 0.0;  jnull[lji]  = 0;
+
+            if (trans[j - MinOctave + 1] == (GABSIGNAL)NULL) {
+                jnull[lji] = 1;
                 continue;
             }
-            freq = k * SampleRate_f;
-            GaborArrayMax(filter, pointer, n_length, SigSize, LnSigSize,
-                          j, freq, SampleRate_n,
-                          &modula, &value_r, &value_i, &index);
-            if (freq == 0 || freq == HalfSigSize)
-                modula /= 2.0;
-            if (modula > MaxModula) {
-                MaxOct         = (double)j;
-                MaxFreq        = (double)freq;
-                MaxTranslation = (double)(SampleRate_n * index);
-                MaxModula      = modula;
-                MaxReal        = value_r;
-                MaxImg         = value_i;
+            if (j > LnSigSize - SubsampleOctaveFreq) {
+                kend         = 1 << (LnSigSize-1);
+                bndBadK      = 1 << (LnSigSize-j);
+                SampleRate_f = 1;
+            } else {
+                kend         = 1 << (SubsampleOctaveFreq+j-2);
+                bndBadK      = 1 << (SubsampleOctaveFreq-1);
+                SampleRate_f = 1 << (LnSigSize-SubsampleOctaveFreq-j+1);
             }
-            pointer += n_2_length;
+            if (j >= SubsampleOctaveTime) {
+                n_length     = SigSize >> (j-SubsampleOctaveTime+1);
+                n_2_length   = n_length << 1;
+                SampleRate_n = 1 << (j-SubsampleOctaveTime+1);
+            } else {
+                n_length     = SigSize;
+                n_2_length   = DoubleSigSize;
+                SampleRate_n = 1;
+            }
+            pointer = trans[j - MinOctave + 1]->values;
+            for (k = 0; k <= kend; k++) {
+                if ((k < bndBadK && k > 0) || (k > (kend-bndBadK) && k < kend)) {
+                    pointer += n_2_length;
+                    continue;
+                }
+                freq = k * SampleRate_f;
+                GaborArrayMax(filter, pointer, n_length, SigSize, LnSigSize,
+                              j, freq, SampleRate_n,
+                              &modula, &value_r, &value_i, &index);
+                if (freq == 0 || freq == HalfSigSize)
+                    modula /= 2.0;
+                if (modula > jmod[lji]) {
+                    jmod[lji]   = modula;
+                    jfreq[lji]  = (double)freq;
+                    jtrnsl[lji] = (double)(SampleRate_n * index);
+                    jreal[lji]  = value_r;
+                    jimg[lji]   = value_i;
+                }
+                pointer += n_2_length;
+            }
+        }
+
+        /* Serial merge — error-check then find global maximum across octaves */
+        for (ji = 0; ji < nOct; ji++) {
+            if (jnull[ji]) {
+                fprintf(stderr,
+                        "GaborGetMaxFrmTrans(): trans[%d] is null!\n", ji + 1);
+                return (WORD)NULL;
+            }
+            if (jmod[ji] > MaxModula) {
+                MaxOct         = (double)(ji + MinOctave);
+                MaxFreq        = jfreq[ji];
+                MaxTranslation = jtrnsl[ji];
+                MaxModula      = jmod[ji];
+                MaxReal        = jreal[ji];
+                MaxImg         = jimg[ji];
+            }
         }
     }
 

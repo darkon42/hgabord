@@ -1,6 +1,6 @@
 /*..........................................................................*/
 /*                                                                          */
-/*      ------------------------------------------------------------*/
+/*      ------------------------------------------------------------        */
 /*      (C) 1993 Copyright New York University, All Right Reserved.         */
 /*                                                                          */
 /*..........................................................................*/
@@ -8,128 +8,85 @@
 /*                                                                          */
 /*  math.c           Some useful mathematical functions                     */
 /*                                                                          */
+/*  Removed (all obsolete as of C99):                                       */
+/*    log2()   — now standard in <math.h>; was conflicting with stdlib      */
+/*    iexp2()  — trivial wrapper around (1<<j); never called                */
+/*    fexp2()  — replaced by exp2() from <math.h>; never called            */
+/*    rint()   — now standard in <math.h>; was wrong (truncated not round)  */
+/*    nint()   — use (int)round() instead; never called                     */
+/*    random() — now standard POSIX; SCO/i386 platform dead; never called   */
+/*                                                                          */
 /****************************************************************************/
-#include "mpp.h"
+//#include "mpp.h"
+#include <math.h>
 
-//#define M_LN2      0.693147180559945309417
+/* M_2_SQRTPI = 2/sqrt(pi) and M_SQRT1_2 = 1/sqrt(2) are both defined in
+ * <math.h> on any C99/POSIX platform. The local defines are kept only as
+ * a fallback for non-conforming environments. */
+#ifndef M_2_SQRTPI
 #define M_2_SQRTPI 1.12837916709551257390
-//#define M_SQRT1_2  0.707106781186547524401
-
-#ifndef sun4
-/* log in base 2 */
-double log2(double x)
-{
-  double y;
-  y= ((double)log(x))/ M_LN2;
-  return(y);
-} /* this function is defined (as double) in math.h on the sun4 */
+#endif
+#ifndef M_SQRT1_2
+#define M_SQRT1_2  0.707106781186547524401
 #endif
 
-
-/* 2^j  (j > 0) */
-int iexp2(int j)
-{
-  return( 1 << j);
-}
-
-/* 2^j  (j can be >= 0 or < 0 ) */
-double fexp2(int j)
-{
-  int k;
-  double s;
-  s = 1.0;
-  if (j >= 0) {
-    return( (double)(1 << j));
-  }
-  else {
-    for (k = j; k < 0 ; k++)
-      s /= 2.0;
-    return(s);
-  }
-}
-
-
-
 /*
- * gauss function g(x) = exp(-(a*(x-b))**2)
-  */
-double gaussian(double x,double a,double b)
-{
-   double y;
-
-   y=(double)exp(-(double)(a*a*(x-b)*(x-b)));
-   return(y);
-}
-/*
- *
- * compute the L2 normalized gaussian:
- *	 g(t)=1/sqrt(2*pi*sigma) exp(-t*t/(2*sigma*sigma)
- *
- * M_2_SQRTPI is 2/sqrt(pi) defined in math.h
- * M_SQRT1_2 is 1/sqrt(2) defined in math.h
- *
- *
+ * gaussian — g(x) = exp(-(a*(x-b))^2)
  */
-double gaussianL2(double t,double sigma)
+double gaussian(double x, double a, double b)
 {
-    double y, tmp;
-
-    tmp = sqrt(sigma);
-    y = exp(-t*t/(2.0*sigma*sigma))*
-		(double)(M_2_SQRTPI*M_SQRT1_2)/(2.0*tmp);
-/*
-    return((double)(exp(-t*t/(2.0*sigma*sigma))*
-		(double)(M_2_SQRTPI*M_SQRT1_2)/(2.0*sqrt(sigma))));
-*/
-    return((double)y);
+    double d = a * (x - b);
+    return exp(-(d * d));
 }
+
 /*
- * singauss function g(x) = [exp(-(a*(x+b))**2) -
-                             exp(-(a*(x - b))**2)] / 2.0
+ * gaussianL2 — L2-normalised Gaussian:
+ *   g(t) = (1 / sqrt(2*pi*sigma)) * exp(-t^2 / (2*sigma^2))
+ *
+ * M_2_SQRTPI = 2/sqrt(pi), M_SQRT1_2 = 1/sqrt(2).
+ * The commented-out duplicate inside the original is removed.
  */
-double singauss(double x,double a,double b)
+double gaussianL2(double t, double sigma)
 {
-double y;
-
-	y=(double)exp(-(double)(a*a*(x+b)*(x+b)));
-	y -= (double)exp(-(double)(a*a*(x-b)*(x-b)));
-	y /= 2.0;
-return(y);
+    double tmp = sqrt(sigma);
+    return exp(-t*t / (2.0*sigma*sigma))
+           * (M_2_SQRTPI * M_SQRT1_2) / (2.0 * tmp);
 }
 
+/*
+ * singauss — g(x) = (exp(-(a*(x+b))^2) - exp(-(a*(x-b))^2)) / 2
+ */
+double singauss(double x, double a, double b)
+{
+    double y;
+    y  = exp(-(a*a*(x+b)*(x+b)));
+    y -= exp(-(a*a*(x-b)*(x-b)));
+    return y / 2.0;
+}
 
-
+/*
+ * find2power — return smallest m such that 2^m >= n.
+ *
+ * Fix 8: original used long for m2 which overflows for large n on 32-bit
+ * platforms. Using unsigned long long makes the shift safe up to 2^63.
+ * For n <= 0 returns 0 by convention.
+ */
 int find2power(int n)
 {
-   long m, m2;
+    int m;
+    unsigned long long m2;
 
-   m = 0;
-   m2 = 1<<m; /* 2 to the power of m */
-   while (m2-n < 0) {
-	m++;
-	m2 <<= 1; /* m2 = m2*2 */
-   }
-   return(m);
+    if (n <= 1) return 0;
+    m  = 0;
+    m2 = 1ULL;
+    while ((long long)m2 - n < 0) {
+        m++;
+        m2 <<= 1;
+    }
+    return m;
 }
-#ifdef hp
-int rint(r)
-double r;
-{
-    return((int)r);
-}
-#endif
-#ifndef sun4
-int nint(double r)
-{
-    return((int)r);
-}
-#endif
-#ifdef i386sco
-int random()
-{
-    return((int)Irand48());
-}
-#endif
+
 /*
  * end of math.c
  */
+ 

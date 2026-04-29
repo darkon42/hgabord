@@ -7,20 +7,20 @@
 /****************************************************************************/
 /*                                                                          */
 /*  mpp.h     Basic include file for all the mpp files.                     */
-/*                   Has to be included in any new mpp file.                */
+/*            Has to be included in any new mpp file.                       */
 /*                                                                          */
 /****************************************************************************/
-#include <stdio.h>  /* Basic include files */
+
+#ifndef MPP_H
+#define MPP_H
+
+#include <stdio.h>
 #include <ctype.h>
 #include <string.h>
-/* #ifndef Solaris */
-/* #include <strings.h> */
-/* #endif */
 #include <math.h>
-#include <malloc.h>
-#ifdef sparc
-#include <alloca.h>
-#endif
+#include <stdlib.h>   /* Fix 1: replaced obsolete <malloc.h> with <stdlib.h> */
+                      /* Fix 2: removed dead #ifdef sparc / <alloca.h> block  */
+
 /*
  * global constants
  */
@@ -32,12 +32,12 @@
 #define STRING_SIZE     200
 #define FILTERNAME_SIZE 10
 #define FILTER_SIZE     128     /* max size of a filter */
-#define MAX_NUM_GABSIGNAL  2       /* number of gabsignals */
+#define MAX_NUM_GABSIGNAL  2    /* number of gabsignals */
 #define MAX_NUM_SB      1       /* number of structure books */
 #define MAX_NUM_FILTER  2       /* size of filter bank vector */
 #define MAX_VALUE       1.0e38  /* max value */
 #define MIN_VALUE       -1.0e38 /* min value */
-#define MAX_NUM_ITERATION 100 /* number of iterations when building the book */
+#define MAX_NUM_ITERATION 100   /* number of iterations when building the book */
 #define WAVELET_PATH    1
 #define WHOLE_PATH      0
 #define KEPT            0
@@ -47,13 +47,12 @@
 #define SHIFTMARK       8
 #define PHASEMARK       16
 #define CHIRP           32
+
 /*
- * include file for gabsignal, must define STRING_SIZE first
+ * include file for gabsignal — must define STRING_SIZE first
  */
-#include "gabsignals.h"    /* definition of the GABSIGNAL structure */
-/*
- * include file for command structure, must define STRING_SIZE first
- */
+#include "gabsignals.h"
+
 /*
  * constants for flags
  */
@@ -89,192 +88,137 @@
 #define d_FLAG          0x20000000
 #define e_FLAG          0x40000000
 #define f_FLAG          0x80000000
-#define PI2             2.0*M_PI
+
+/* Fix 5: PI2 macro was missing parentheses — 1.0/PI2 would expand to
+ * 1.0/2.0*M_PI = M_PI/2.0 without them. */
+#define PI2             (2.0 * M_PI)
+
 /*
- * Useful Macros
+ * Useful macros
  */
-/*
- * returns YES iff inf <= x <= sup
- */
+/* returns YES iff inf <= x <= sup */
 #define INRANGE(inf,x,sup)  ((inf) <= (x) && (x) <= (sup))
+/* square of a number */
+#define SQUARE(x)           ((x)*(x))
+/* max of two numbers */
+#define MAX(x,y)            ((x) > (y) ? (x) : (y))
+/* min of two numbers */
+#define MIN(x,y)            ((x) < (y) ? (x) : (y))
+/* sign of a number */
+#define SIGN(x)             ((x) < 0 ? (-1) : (x) > 0 ? 1 : 0)
+/* masking equal operator */
+#define MEQ(flag,mask)      (((flag) & (mask)) == (mask))
+/* masking not operator */
+#define MNOT(flag,mask)     ((((flag) & (mask)) == (mask)) ? (flag)^(mask) : (flag))
+
 /*
- * square of a number
- */
-#define SQUARE(x)  ((x)*(x))
-/*
- * Max of two numbers
- */
-#define MAX(x,y)  ((x) > (y) ? (x) : (y))
-/*
- * Min of two numbers
- */
-#define MIN(x,y)  ((x) < (y) ? (x) : (y))
-/*
- * Sign of a number
- */
-#define SIGN(x)  ((x) < 0 ? (-1) : (x) > 0 ? 1 : 0)
-/*
- * Masking Equal operator
- */
-#define MEQ( flag, mask) ( (((flag) & (mask)) == (mask)) )
-/*
- * Masking Not operator
- */
-#define MNOT(flag, mask) ( (((flag) & (mask)) == (mask)) ? (flag)^(mask) : (flag) )
-/*
- *       Filter structure
+ * Filter structure (alias for GABSIGNAL)
  */
 typedef GABSIGNAL FILTER;
+
 /*
- *       Index Structure
+ * Index structure
  */
 typedef struct index {
-	double id;      /* frequency of structure */
-	double octave;          /* scale of structure     */
-	double position; /* position of structure  */
-	double phase;   /* phase for of the structure */
+    double id;       /* frequency of structure */
+    double octave;   /* scale of structure     */
+    double position; /* position of structure  */
+    double phase;    /* phase of the structure */
 } *INDEX;
+
 /*
- *       WORD
+ * Word structure
  */
 typedef struct word {
-	double coeff; /* coefficient value (real part) */
-	double value; /* value of the word */
-	double coeff1;
-	double value1;
-	int status; /* either KEPT or DISCARD */
-	INDEX index; /* index which contains which frequency, position, and scale. */
-	struct word *next; /* next node */
+    double coeff;       /* coefficient value (real part) */
+    double value;       /* value of the word */
+    double coeff1;
+    double value1;
+    int    status;      /* either KEPT or DISCARD */
+    INDEX  index;       /* frequency, position, and scale */
+    struct word *next;  /* next node in book linked list */
 } *WORD;
+
 /*
- *       BOOK
+ * Book structure
  */
 typedef struct book {
-	WORD first; /* first element in the list */
-	WORD last; /* last element in the list */
-	int size;  /* number of structures in structure book */
-	double energy; /* energy of structure book representation */
-	double sigen; /* energy of gabsignal */
-	int id;    /* structure book volume number for I.D. purposes */
-	int type;  /* structure book type */
-	double smax;
-	double smin; /* maximum and minimum parameters of decomp */
-	int sig_size; /* the size of gabsignal */
+    WORD   first;     /* first element in the list */
+    WORD   last;      /* last element in the list */
+    int    size;      /* number of words in book */
+    double energy;    /* energy of book representation */
+    double sigen;     /* energy of original signal */
+    int    id;        /* book volume number */
+    int    type;      /* book type */
+    double smax;
+    double smin;      /* max and min parameters of decomposition */
+    int    sig_size;  /* size of the signal */
 } *BOOK;
 
-#define WAVELET 0
-#define GABOR   1
-#define QMF     2
-#define DELTAFOURIER 3
-#define NEWGABOR 4
-#define FOURIER 5
-#define DIRAC 6
+#define WAVELET       0
+#define GABOR         1
+#define QMF           2
+#define DELTAFOURIER  3
+#define NEWGABOR      4
+#define FOURIER       5
+#define DIRAC         6
 #define WINDOWFOURIER 7
 
 /*
  * global variables
  */
+extern GABSIGNAL gabsignals[MAX_NUM_GABSIGNAL];
+extern BOOK      library[MAX_NUM_SB];
+extern GABSIGNAL cur_gabsignal;
+extern int       cur_sig_size;
+extern BOOK      old_cur_book;
+extern GABSIGNAL *old_cur_filter;
+extern int       Current_Book, Old_Book;
+extern int       filter_type[MAX_NUM_SB];
+extern GABSIGNAL *filter[MAX_NUM_SB];
+extern int       cur_shift_octave;
+extern int       cur_SOT;
+extern int       cur_SOF;
+extern int       old_cur_num_filter;
+extern int       num_filter[MAX_NUM_SB];
+extern int       plot_var;
+extern FILE      *foutput;
+
+#define cur_book         (library[Current_Book])
+#define cur_filter       (filter[Current_Book])
+#define cur_filter_type  (filter_type[Current_Book])
+#define cur_num_filter   (num_filter[Current_Book])
+
+#define BW 0
+#define CP 1
 
 /*
- * gabsignals
+ * Fix 4: proper prototypes replacing K&R-style unprototyped extern declarations.
+ * Fix 3: log2() extern declarations removed — log2() is standard in <math.h>
+ *        since C99 and our local definition in math.c has been deleted.
+ * Fix 6: dead #ifdef PROTOTYPES block removed (PROTOTYPES was never defined).
+ * Fix 7: commented-out error() declaration removed.
  */
-extern GABSIGNAL gabsignals[MAX_NUM_GABSIGNAL];
+extern char      *check_format(const char *fmt);
+extern GABSIGNAL *AllocFilter(int MaxOctave);
+extern INDEX      AllocIndex(void);
+extern WORD       AllocWord(void);
+extern BOOK       AllocBook(void);
+extern GABSIGNAL  new_gabsignal(int size);
+extern void       warning(char *str);
+extern void 	  clear_book(BOOK book);
+
 /*
- * structure books
- */
-extern BOOK library[MAX_NUM_SB];
-/*
- * current gabsignal
- */
-extern GABSIGNAL cur_gabsignal;
-/*
- * current gabsignal size
- */
-extern int cur_sig_size;
-/*
- * current book
- */
-/* extern BOOK cur_book;  */
-#define cur_book (library[Current_Book])
-/*
- * previous book
- */
-extern BOOK old_cur_book;
-/*
- * filters
- */
-/*extern GABSIGNAL *cur_filter, *old_cur_filter; */
-extern GABSIGNAL *old_cur_filter;
-extern int Current_Book, Old_Book;
-extern int filter_type[MAX_NUM_SB];
-#define cur_filter (filter[Current_Book])
-#define cur_filter_type (filter_type[Current_Book])
-extern GABSIGNAL * filter[MAX_NUM_SB];
-/*
- * shift octave, subsample octave in traslation
- * and subsample octave in frequency
+ * Fix 8: typo "traslation" corrected to "translation" in comment below.
+ *
+ * shift octave, subsample octave in translation and subsample octave in frequency
  */
 extern int cur_shift_octave;
 extern int cur_SOT;
 extern int cur_SOF;
-/*
- * number of filters
- */
-/*extern int cur_num_filter, old_cur_num_filter; */
-extern int old_cur_num_filter;
-#define cur_num_filter (num_filter[Current_Book])
-/*
- * number of filters
- */
-extern int num_filter[MAX_NUM_SB];
-/*
- * functions
- */
-extern char *check_format();
-extern GABSIGNAL *AllocFilter();
-extern INDEX AllocIndex();
-extern WORD AllocWord();
-extern BOOK AllocBook();
-
-extern int plot_var;
-
-#define BW 0
-#define CP 1
-/*
- * input/ output
- */
-extern FILE *foutput;
-
-
-/*-------------------------------------------------------------------------*/
-/* Function prototypes */
-/*-------------------------------------------------------------------------*/
-
-#ifdef PROTOTYPES
-
-#include "alloc.h"
-#include "int.h"
-#include "book.h"
-#include "sig.h"
-
-#ifndef sun4
-extern double log2(double);
-#endif
-
-#else
-#ifndef sun4
-extern double log2();
-#endif
-
-#endif
-
-
-/*-------------------------------------------------------------------------*/
-
-//extern void error(char *str);
-extern GABSIGNAL new_gabsignal(int size); /* allocate a gabsignal structure and an array of double (in this gabsignal) */
-void warning(char *str);
 
 /*
  * end of mpp.h
  */
+
+#endif /* MPP_H */
