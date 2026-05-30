@@ -21,7 +21,6 @@
 #include <stdlib.h>
 
 #include <fftw3.h>
-#include <omp.h>
 
 #ifdef __unix__
     #include <sys/types.h>
@@ -100,6 +99,30 @@ double th_pct;                      /* criterion for terminate analysis based on
 int max_num_iter=500;                   /*  idem by number of atoms*/
 double thatomnrj, last_atom_nrj;    /* threshold of atoms energy and last atoms added nrj */
 
+/* Declared extern in mpp.h; defined here so clients need not supply them. */
+int Old_Book          = 0;
+int plot_var          = 0;
+int old_cur_num_filter = 0;
+
+/* gabord_initialised was a static local inside gabord(); moved to file scope
+ * so it can be declared threadprivate for multi-channel parallel execution. */
+int gabord_initialised = 0;
+
+/* Per-thread private state for gabord() — each OpenMP thread gets its own
+ * independent copy of all algorithm state so gabord() can be called
+ * concurrently from different threads without data races.
+ * Threadprivate variables for cross-file globals are declared in mpp.h. */
+#ifdef _OPENMP
+/* gabord_initialised and the per-call signal/filter state are private per
+ * thread.  Stopping criteria (cpct, citer, …) are shared but written to the
+ * same values by all threads, so the data race is benign in practice.
+ * last_atom_nrj is written each iteration; make it private so threads don't
+ * corrupt each other's stopping decisions. */
+#pragma omp threadprivate(\
+    gabord_initialised, gabsignal, sigtmp, values,\
+    cur_MaxOctave, cur_MinOctave, last_atom_nrj)
+#endif
+
 /***************************************************************************************************************************/
 /***************************************************************************************************************************/
 
@@ -135,6 +158,12 @@ double *gabord(double *data, int SigSize, int *booksize)
 	long i;
 	int iter;
 	static int nL=7, maxlh=0;
+#ifdef _OPENMP
+	/* nL/maxlh cache which size the threadprivate pfG/pfB/pfC arrays were
+	 * built for; they must be per-thread to stay consistent with those
+	 * (threadprivate) buffers when gabord() runs concurrently. */
+#pragma omp threadprivate(nL, maxlh)
+#endif
 	double res_n, res_n1, orgN=-1.0;
 	int l, h;
 	unsigned long flag=N_FLAG;
@@ -179,18 +208,28 @@ double *gabord(double *data, int SigSize, int *booksize)
 
 /* initializations     from int_loop.c  */
 
- /* Fix F: only initialise globals on first call.
- * Previously this block ran unconditionally, discarding filter[] pointers
- * without freeing them and re-allocating library/gabsignals/temporary
- * on every call to gabord(). */
-	static int gabord_initialised = 0;
-
+ /* Fix F: only initialise globals on first call (per thread when parallel).
+  * Worker threads in an OpenMP parallel region have UNDEFINED initial values
+  * for threadprivate variables unless copyin is used.  Explicitly zero all
+  * index/pointer globals before any read so we never dereference garbage. */
 	if (!gabord_initialised) {
+		/* Safe defaults for all per-thread index variables */
+		Current_Book      = 0;
+		cur_sig_size      = 0;
+		cur_shift_octave  = 0;
+		cur_SOT = 1; cur_SOF = 1;
+		cur_l   = 0; cur_h   = 0;
+		old_cur_num_filter = 0;
+		old_cur_book   = (BOOK)NULL;
+		old_cur_filter = (GABSIGNAL *)NULL;
+		cur_gabsignal  = (GABSIGNAL)NULL;
+
 		for (sb_index = 0; sb_index < MAX_NUM_SB; sb_index++) {
 			filter[sb_index]      = (GABSIGNAL *)NULL;
 			num_filter[sb_index]  = 0;
 			TransAlloc[sb_index]  = 0;
 			filter_type[sb_index] = -1;
+			transform[sb_index]   = (GABSIGNAL *)NULL;
 		}
 		/* allocation of book */
 		for (i = 0; i < MAX_NUM_SB; i++) {
@@ -201,12 +240,12 @@ double *gabord(double *data, int SigSize, int *booksize)
 		for (i = 0; i < MAX_NUM_GABSIGNAL; i++)
 			gabsignals[i] = new_struct_gabsignal();
 
+		/* Now safe to read cur_book = library[Current_Book=0] */
 		old_cur_book   = cur_book;
-		/* assign the current gabsignal */
 		cur_gabsignal  = gabsignals[0];
 		temporary      = new_struct_gabsignal();
 		old_cur_filter = filter[0];
-		Current_Book   = 0;
+		Current_Book   = 0;  /* redundant but explicit */
 
 		gabord_initialised = 1;
 	} else {
@@ -222,13 +261,19 @@ double *gabord(double *data, int SigSize, int *booksize)
 	if (gabsignal != (GABSIGNAL)NULL)
 		delete_gabsignal(gabsignal);
 	
-	gabsignal = new_gabsignal((int)SigSize);
-	
+	/* Fix: round up to next power of 2 BEFORE allocating so size_alloca
+	 * matches the actual buffer; sig_mean/sig_add_num iterate to
+	 * gabsignal->size and would overflow the original (smaller) allocation.
+	 * Indices SigSize..lndata-1 are zeroed by calloc inside darray_malloc. */
 	Lnlndata = find2power(lndata);
 	lndata = 1<<Lnlndata;
-
+	gabsignal = new_gabsignal(lndata);
+	/* was:
+	gabsignal = new_gabsignal((int)SigSize);
+	Lnlndata = find2power(lndata);
+	lndata = 1<<Lnlndata;
 	gabsignal->size_alloca = (int) SigSize;
-	gabsignal->size = lndata;
+	gabsignal->size = lndata; */
 	gabsignal->shift = 0;
 	gabsignal->scale = 1;
 	gabsignal->firstp = 0;
@@ -301,16 +346,21 @@ double *gabord(double *data, int SigSize, int *booksize)
 			cur_transform = GaborFreeFilter(cur_transform, cur_TransAlloc);
 	}
 
-	/* Fix B: load wisdom before plan creation - to speed FFTW*/
-	fftw_import_wisdom_from_filename("fftw_wisdom.dat");
-	
+	/* Build the (threadprivate) filter bank once per thread.
+	 * GaborBuildFilter writes only threadprivate/local state and creates no
+	 * FFTW plans, so it needs no lock.  FFTW plan creation happens later in
+	 * GaborDecomp -> get_plans(), which serialises the planner itself.
+	 *
+	 * The old fftw_wisdom.dat import/export (and the global critical that
+	 * wrapped it) were removed: get_plans() now uses FFTW_ESTIMATE, so there
+	 * is no wisdom file to read, write, or race on — the previous code read
+	 * the file from disk on EVERY call and serialised all threads through one
+	 * lock, which destroyed scaling under parallel use. */
 	if (cur_filter == (FILTER *)NULL)
 	{
-		cur_filter = GaborBuildFilter( LnSigSize, SigSize, sigma,&cur_norm);
-		cur_num_filter = LnSigSize+1;
+		cur_filter = GaborBuildFilter(LnSigSize, SigSize, sigma, &cur_norm);
+		cur_num_filter = LnSigSize + 1;
 		cur_filter_type = NEWGABOR;
-		/* Fix B: save plans for next run — skips benchmarking on repeat calls */
-		fftw_export_wisdom_to_filename("fftw_wisdom.dat");
 	}
 
 	/* Do the decomposition */
@@ -479,13 +529,20 @@ double *gabord(double *data, int SigSize, int *booksize)
 				break;
 		}
 
-		GaborBuildBook(cur_transform,cur_filter,cur_book,
-		               cur_MinOctave,
-		               cur_MaxOctave,
-		               nL,
-		               cur_SOT,cur_SOF,l,h,
-		               pnIep,pfC,pfB,pfG,pfCE1,
-		               cur_norm);
+		{
+			int prev_size = cur_book->size;
+			GaborBuildBook(cur_transform,cur_filter,cur_book,
+			               cur_MinOctave,
+			               cur_MaxOctave,
+			               nL,
+			               cur_SOT,cur_SOF,l,h,
+			               pnIep,pfC,pfB,pfG,pfCE1,
+			               cur_norm);
+			/* If no atom was appended (e.g. illegal translation),
+			 * the signal is depleted — further iterations will spin. */
+			if (cur_book->size == prev_size)
+				break;
+		}
 
 		last_atom_nrj = cur_book->last->coeff*cur_book->last->coeff;
 		
@@ -523,120 +580,88 @@ double *gabord(double *data, int SigSize, int *booksize)
 	return Fbook;
 }
 /* END of Gabor*/
-
-#define DATAARRAY_SIZE 2048
-
-/* The MAIN function */
-int main()
+/*
+ * gabord_cleanup — release all heap memory allocated by the library.
+ * Call once at program exit after the last gabord() call.
+ * FFTW plans are freed automatically via atexit(); this handles the rest.
+ */
+void gabord_cleanup(void)
 {
-	int bsize;
-	double threshold=10;
-	double *bookB;
-	int n, i, j;
-	
-	 omp_set_num_threads(4);
+    int i;
+    extern void   delete_gabsignal(GABSIGNAL gabsignal);
+    extern FILTER *GaborFreeFilter(FILTER *, int);
+    extern void   GaborOperCleanup(void);
 
-	//int m=1024;
-	double *data = NULL;
-	
-	extern void delete_gabsignal(GABSIGNAL gabsignal);
-	extern FILTER *GaborFreeFilter(FILTER*, int);
-	extern void GaborOperCleanup(void);
+    free(pnIep);  pnIep = NULL;
+    free(pnAep);  pnAep = NULL;
 
-	data = (double*) malloc(DATAARRAY_SIZE*sizeof(double));
-	if (data==NULL) {		fprintf(stderr, "alloc error\n");		return(1);	}
+    for (i = 0; i < MAX_NUM_SB; i++) {
+        clear_book(library[i]);
+        free(library[i]);
+    }
 
-	//Replacing random numbers with reading EEG data from data.bin file
-	FILE *fp=fopen("data.bin","rb");
-	if (!fp) {
-		perror("fopen");
-		return 1;
-	}
-	/*Determine file size*/
-	fseek(fp,0,SEEK_END);
-	long filesize=ftell(fp);
-	rewind(fp);
-	
-	size_t nbdata= filesize/sizeof(double);
-	
-	size_t nread=fread(data, sizeof(double), nbdata, fp);
-	
-	if (nread != nbdata) {
-		fprintf(stderr, "Read error\n");
-		free(data);
-		return 1;
-	}
-	
-	fclose(fp);
-	
-	// Generate a random data set
-    //int arr[DATAARRAY_SIZE];
-    //srand(time(0));
-	// for (i = 0; i < DATAARRAY_SIZE; i++) data[i] = (rand() % 100);
-		
-	//printf("Data point:");
-	//for (i=0;i<5;i++) printf("%f,", data[i]);
-	//printf("\n");
+    free(pfB);   pfB   = NULL;
+    free(pfC);   pfC   = NULL;
+    free(pfG);   pfG   = NULL;
+    free(pfCE1); pfCE1 = NULL;
+    free(pfCE2); pfCE2 = NULL;
+    free(pfCE3); pfCE3 = NULL;
+    free(cur_norm); cur_norm = NULL;
 
-	cth=0; 
-	ccoh=0; 
-	cpct=0; 
-	citer=500;
-	thatomnrj=threshold;
-	for (j=0;j<100;j++)	
-		{
-		bookB=gabord(data, DATAARRAY_SIZE, &bsize);
-	/*for (i=1;i<=10;i++) {
-		printf("Atom %d: Oct=%2.0f, ID=%2.0f, Pos.=%4.0f, Freq.=%f, Phase=%1.3f\n", 
-		i, bookB[5*(i-1)+0],bookB[5*(i-1)+1],bookB[5*(i-1)+2],bookB[5*(i-1)+3],bookB[5*(i-1)+4]);  
-	}*/
-		free(bookB);
-		}
-	
-	printf("\nComputation completed!\n");
+    for (i = 0; i < MAX_NUM_GABSIGNAL; i++)
+        delete_gabsignal(gabsignals[i]);
 
-	//free(bookB);
-	free(data);
+    for (i = 0; i < MAX_NUM_SB; i++)
+        if (transform[i] != (GABSIGNAL *)NULL)
+            GaborFreeFilter(transform[i], TransAlloc[i]);
 
-	// releasing pointers
-	free(pnIep);
-	free(pnAep);
+    for (i = 0; i < MAX_NUM_SB; i++)
+        if (filter[i] != (FILTER *)NULL)
+            GaborFreeFilter(filter[i], num_filter[i]);
 
-	for (i=0; i<MAX_NUM_SB; i++)
-	{
-		clear_book(library[i]);
-		free(library[i]);
-	}
-	
-	free(pfB);
-	free(pfC);
-	free(pfG);
+    delete_gabsignal(temporary);
+    delete_gabsignal(gabsignal);
 
-	for (i=0; i<MAX_NUM_GABSIGNAL; i++)	delete_gabsignal(gabsignals[i]);
-		
-
-	for (i=0; i<MAX_NUM_SB; i++)
-		if (transform[i] != (GABSIGNAL *)NULL)
-			GaborFreeFilter(transform[i], TransAlloc[i]);
-
-	for (i=0; i<MAX_NUM_SB; i++)
-		if (filter[i] != (FILTER *)NULL)
-			GaborFreeFilter(filter[i], num_filter[i]);
-	
-	delete_gabsignal(temporary);
-	delete_gabsignal(gabsignal);
-	//delete_gabsignal(sigtmp);
-
-	free(pfCE1);
-	free(pfCE2);
-	free(pfCE3);
-
-	free(cur_norm);
-
-	GaborOperCleanup();
-
-	return(0);
-
+    GaborOperCleanup();
 }
 
-
+/*
+ * gabord_reset — force re-initialisation of all per-thread state.
+ * Call this once per worker thread (inside a parallel region) before
+ * the first gabord() call when using --jobs N > 1.  Without it, new
+ * OpenMP threads have undefined initial values for threadprivate variables.
+ */
+void gabord_reset(void)
+{
+    int i;
+    Current_Book      = 0;
+    cur_sig_size      = 0;
+    cur_shift_octave  = 0;
+    cur_SOT           = 1;
+    cur_SOF           = 1;
+    cur_l             = 0;
+    cur_h             = 0;
+    old_cur_num_filter = 0;
+    old_cur_book      = (BOOK)NULL;
+    old_cur_filter    = (GABSIGNAL *)NULL;
+    cur_gabsignal     = (GABSIGNAL)NULL;
+    gabsignal         = (GABSIGNAL)NULL;
+    sigtmp            = (GABSIGNAL)NULL;
+    temporary         = (GABSIGNAL)NULL;
+    cur_norm          = (double *)NULL;
+    pfG = pfCE1 = pfCE2 = pfCE3 = pfC = pfB = (double *)NULL;
+    pnAep = pnIep = (int *)NULL;
+    cur_MaxOctave     = 0;
+    cur_MinOctave     = 0;
+    for (i = 0; i < MAX_NUM_SB; i++) {
+        filter[i]      = (GABSIGNAL *)NULL;
+        transform[i]   = (GABSIGNAL *)NULL;
+        library[i]     = (BOOK)NULL;
+        num_filter[i]  = 0;
+        TransAlloc[i]  = 0;
+        filter_type[i] = -1;
+    }
+    for (i = 0; i < MAX_NUM_GABSIGNAL; i++)
+        gabsignals[i] = (GABSIGNAL)NULL;
+    gabord_initialised = 0;
+}

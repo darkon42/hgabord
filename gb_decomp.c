@@ -52,6 +52,14 @@ typedef struct {
 #define MAX_PLAN_CACHE 32
 static PlanEntry plan_cache[MAX_PLAN_CACHE];
 static int       plan_cache_count = 0;
+/* Thread safety: make the plan cache threadprivate so each worker thread owns
+ * its own scratch buffers (e->buf).  Two threads must never call fftw_execute
+ * on a shared buffer concurrently — with per-thread caches they never do.
+ * FFTW plan *creation* is still serialised in get_plans() (the planner uses
+ * global state and is not thread-safe). */
+#ifdef _OPENMP
+#pragma omp threadprivate(plan_cache, plan_cache_count)
+#endif
 
 /* Call this at program exit (or via atexit()) to release all FFTW resources. */
 void GaborFFTCleanup(void)
@@ -75,11 +83,16 @@ static PlanEntry *get_plans(int SigSize)
     int i;
     PlanEntry *e;
 
-	// At the top of get_plans(), first time only:
 	static int cleanup_registered = 0;
-	if (!cleanup_registered) {
-		atexit(GaborFFTCleanup);
-		cleanup_registered = 1;
+	/* Use a distinct critical-section name: gabord_filter_build (in gabord.c)
+	 * calls GaborBuildFilter → get_plans(), so using the same name would
+	 * deadlock (OpenMP named criticals are not reentrant). */
+	#pragma omp critical(fftw_atexit)
+	{
+		if (!cleanup_registered) {
+			atexit(GaborFFTCleanup);
+			cleanup_registered = 1;
+		}
 	}
 
     for (i = 0; i < plan_cache_count; i++)
@@ -98,19 +111,24 @@ static PlanEntry *get_plans(int SigSize)
     if (!e->buf) { perror("fftw_malloc"); exit(1); }
 
     /*
-     * FFTW_MEASURE lets FFTW benchmark a few strategies at plan-creation time
-     * and pick the fastest for this machine. Use FFTW_ESTIMATE if you want
-     * faster startup at the cost of slightly slower transforms.
+     * FFTW_ESTIMATE (was FFTW_MEASURE): the transforms here are tiny and only
+     * ~1.4% of total runtime, so benchmarked plans buy essentially nothing,
+     * while ESTIMATE needs no wisdom file — the old fftw_wisdom.dat was a
+     * CWD-shared race across concurrent maf_gabord processes.
+     *
+     * Thread safety: the FFTW planner mutates global state and is NOT
+     * thread-safe, so every fftw_plan_* call (across all threads) must be
+     * serialised.  Execution (fftw_execute) stays fully parallel because each
+     * thread owns its own threadprivate buffer.
      */
-    e->forward = fftw_plan_dft_1d(SigSize, e->buf, e->buf,
-                                  FFTW_FORWARD,  FFTW_MEASURE);
-    e->inverse = fftw_plan_dft_1d(SigSize, e->buf, e->buf,
-                                  FFTW_BACKWARD, FFTW_MEASURE);
-    //if (!e->forward || !e->inverse) {
-    //    fprintf(stderr, "GaborDecomp: fftw_plan_dft_1d failed for N=%d\n", SigSize);
-    //    exit(1);
-    //}
-	
+    #pragma omp critical(fftw_planner)
+    {
+        e->forward = fftw_plan_dft_1d(SigSize, e->buf, e->buf,
+                                      FFTW_FORWARD,  FFTW_ESTIMATE);
+        e->inverse = fftw_plan_dft_1d(SigSize, e->buf, e->buf,
+                                      FFTW_BACKWARD, FFTW_ESTIMATE);
+    }
+
 	if (!e->forward || !e->inverse) {
 		fprintf(stderr, "GaborDecomp: fftw_plan_dft_1d failed for N=%d\n", SigSize);
 		if (e->forward) fftw_destroy_plan(e->forward);

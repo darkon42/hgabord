@@ -10,6 +10,7 @@
 /*									    */
 /* ************************************************************************ */
 #include <stdio.h>
+#define _GNU_SOURCE
 #include <math.h>
 #include <string.h>
 #include "mpp.h"

@@ -2,6 +2,9 @@
 #include <math.h>
 #include "mpp.h"
 #include "cwt1d.h"
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #ifdef __unix__
     #include <sys/types.h>
@@ -30,7 +33,7 @@ static inline void cmul(double ar, double ai, double br, double bi,
 WORD       GaborGetMaxFrmTrans(GABSIGNAL *trans, FILTER *filter,
                                 int MinOctave, int MaxOctave, int LnSize,
                                 int SubsampleOctaveTime, int SubsampleOctaveFreq);
-void       GaborGetResidue(GABSIGNAL *trans, FILTER *filter,
+int        GaborGetResidue(GABSIGNAL *trans, FILTER *filter,
                             WORD word, int LnSize);
 void       BookAppend(BOOK book, WORD word);
 void       UpdateGabor(GABSIGNAL *trans, WORD word,
@@ -101,8 +104,12 @@ void GaborBuildBook(GABSIGNAL *trans, FILTER *filter, BOOK book,
         getMaxFrmNewton(word, trans, filter, MinOctave, MaxOctave, LnSize,
                         l-1, h-1, SubsampleOctaveTime-1, SubsampleOctaveFreq-1);
 
-    /* Subtract the selected atom from the transform (compute residue) */
-    GaborGetResidue(trans, filter, word, LnSize);
+    /* Subtract the selected atom from the transform (compute residue).
+     * Fix 10: skip UpdateGabor/GaborUpdateFourier/BookAppend if the atom
+     * has an illegal position — proceeding with a bad position causes
+     * out-of-bounds writes and an eventual segfault. */
+    if (GaborGetResidue(trans, filter, word, LnSize) != 0)
+        return;
 
     UpdateGabor(trans, word, MinOctave, MaxOctave, LnSize,
                 SubsampleOctaveTime-1, SubsampleOctaveFreq-1, l-1, h-1,
@@ -147,15 +154,16 @@ void GaborUpdateFourier(GABSIGNAL *trans, FILTER *filter, WORD word,
             coeff = -coeff / sqrtN;
         else
             coeff /= sqrtN;
-			
-		double *v1r0 = v1r, *v1i0 = v1i;                                                                                                                                                             
-		//#pragma omp parallel for private(index1)                  
-		  for (k2 = 0; k2 < N; k2++)              
-			  {                                                                                                                                                                                        
-			  index1 = (k2 * p1) % N;
-			  v1r0[k2] -= coeff * v2r[index1];                                                                                                                                                         
-			  v1i0[k2] += coeff * v2i[index1];                      
-			  }    
+        {
+        double *v1r0 = v1r, *v1i0 = v1i;
+        #pragma omp parallel for private(index1) if(!omp_in_parallel())
+        for (k2 = 0; k2 < N; k2++)
+            {
+            index1 = (k2 * p1) % N;
+            v1r0[k2] -= coeff * v2r[index1];
+            v1i0[k2] += coeff * v2i[index1];
+            }
+        }
         }
     else if (j1 == L)
         {
@@ -178,16 +186,16 @@ void GaborUpdateFourier(GABSIGNAL *trans, FILTER *filter, WORD word,
         v2i = v2r + N;
         vg  = filter[L - j1]->values;
 
-		double *v1r0 = v1r, *v1i0 = v1i;
-		//#pragma omp parallel for private(index1, index2, tmp)
-
+        {
+        double *v1r0 = v1r, *v1i0 = v1i;
+        #pragma omp parallel for private(index1, index2, tmp) if(!omp_in_parallel())
         for (k2 = 0; k2 < N; k2++)
             {
             double cr, ci;
 
             /* First term: k2 - k1 */
             index1 = k2 - k1 + N;
-            index2 = (index1 * p1) % N;  /* wraps independently of index1 */
+            index2 = (index1 * p1) % N;
             index1 %= N;
             if (index1 < filter[L-j1]->size)
                 tmp = vg[index1];
@@ -198,12 +206,9 @@ void GaborUpdateFourier(GABSIGNAL *trans, FILTER *filter, WORD word,
             if (tmp != 0.0)
                 {
                 tmp *= coeff;
-                /* Fix 4: cmul() replaces back-to-back CMREAL/CMIMAGINARY */
                 cmul(v2r[index2], -v2i[index2], cosPhi, sinPhi, &cr, &ci);
-                //*v1r -= tmp * cr;
-                //*v1i -= tmp * ci;
-				v1r0[k2] -= tmp * cr;
-				v1i0[k2] -= tmp * ci;  
+                v1r0[k2] -= tmp * cr;
+                v1i0[k2] -= tmp * ci;
                 }
 
             /* Second term: k2 + k1 */
@@ -219,18 +224,12 @@ void GaborUpdateFourier(GABSIGNAL *trans, FILTER *filter, WORD word,
             if (tmp != 0.0)
                 {
                 tmp *= coeff;
-                /* Fix 4: cmul() — note conjugate sinPhi for second term */
                 cmul(v2r[index2], -v2i[index2], cosPhi, -sinPhi, &cr, &ci);
-				
-				v1r0[k2] -= tmp * cr;
-				v1i0[k2] -= tmp * ci;
-                //*v1r -= tmp * cr;
-                //*v1i -= tmp * ci;
+                v1r0[k2] -= tmp * cr;
+                v1i0[k2] -= tmp * ci;
                 }
-
-            //v1r++;
-            //v1i++;
             }
+        }
         }
 }
 

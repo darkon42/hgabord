@@ -1,5 +1,8 @@
 #include "mpp.h"
 #include <stdlib.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #define mqMax 4
 #define mqMax2 2*mqMax
 #define mqMax3 mqMax2+mqMax
@@ -164,19 +167,26 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 		if (fabs(phi)>1.0e-5) {
 			coeff = -coeff;
 			}
+		/* Each j2 writes to its own trans[j2-MinOctave+1] slot — no conflicts.
+		 * Pointer walk converted to indexed access for thread safety. */
+		#pragma omp parallel for schedule(static) if(!omp_in_parallel()) \
+			private(Lj2,l2,h2,p2Max,k2Max,vg,k2,p2,ntmp, \
+			        kIndx,kIndxStep,pIndx,pIndxStep,cos_phi,sin_phi)
 		for ( j2 = MinOctave; j2 <= MaxOctave; j2++) {
+			double *vbase, *vr_k, *vi_k;
 			Lj2 = L-j2;
 			l2 = SSFACTOR(j2,l);
 			h2 = SSFACTOR(Lj2,h);
 			p2Max = P2MAX(L,j2,l2);
 			k2Max = K2MAX(j2,h2);
 			vg = pfFilter[j2]->values;
-			vr = trans[j2 - MinOctave + 1]->values;
+			vbase = trans[j2 - MinOctave + 1]->values;
 			kIndx = 0;
 			kIndxStep = p1<<(Lj2-h2);
 			for (k2=0; k2<=k2Max; k2++) {
-				vi = vr+p2Max;
-				ntmp = kIndx%N; /* Fix 6: computed once, reused for both pfCE1 lookups */
+				vr_k = vbase + (long)k2 * 2 * p2Max;
+				vi_k = vr_k + p2Max;
+				ntmp = kIndx%N;
 				cos_phi = coeff*pfCE1[ntmp];
 				sin_phi = -coeff*pfCE1[N+ntmp];
 				kIndx += kIndxStep;
@@ -186,22 +196,16 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 					ntmp = pIndx%N;
 					if (ntmp<pfFilter[j2]->size)
 						{
-						*vr++ -= vg[ntmp]*cos_phi;
-						*vi++ -= vg[ntmp]*sin_phi;
+						vr_k[p2] -= vg[ntmp]*cos_phi;
+						vi_k[p2] -= vg[ntmp]*sin_phi;
 						}
 					else if (N-ntmp<pfFilter[j2]->size)
 						{
-						*vr++ -= vg[N-ntmp]*cos_phi;
-						*vi++ -= vg[N-ntmp]*sin_phi;
-						}
-					else
-						{
-						vr++;
-						vi++;
+						vr_k[p2] -= vg[N-ntmp]*cos_phi;
+						vi_k[p2] -= vg[N-ntmp]*sin_phi;
 						}
 					pIndx -= pIndxStep;
 					} /* end p2 loop */
-				vr = vi;
 				} /* end of k2 loop */
 			} /* end of j2 loop */
 		return;
@@ -218,20 +222,30 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 	}
 	if (j1==L)
 		{
+		/* Each j2 writes to its own trans[j2-MinOctave+1] slot — no conflicts.
+		 * Pointer walk converted to indexed access for thread safety. */
+		#pragma omp parallel for schedule(static) if(!omp_in_parallel()) \
+			private(Lj2,l2,h2,p2Max,k2Max,vg,kIndx,kIndxStep,pIndxStep, \
+			        k2,p2,ntmp,dtmp1,dtmp2,dCos,dSin,dCos2,dSin2, \
+			        dReal1,dReal2,dImag1,dImag2)
 		for ( j2= MinOctave;j2 <= MaxOctave; j2++)
 			{
+			double *vbase, *vr_k, *vi_k;
 			Lj2 = L-j2;
 			l2 = SSFACTOR(j2,l);
 			h2 = SSFACTOR(Lj2,h);
 			p2Max = P2MAX(L,j2,l2);
 			k2Max = K2MAX(j2,h2);
-			vr = trans[j2 - MinOctave +1]->values;
+			vbase = trans[j2 - MinOctave +1]->values;
 			vg = pfFilter[L-j2]->values;
 			kIndxStep = Lj2-h2;
 			pIndxStep = j2-l2;
 			for (kIndx=0;kIndx<=k2Max;kIndx++)
 				{
-				vi = vr+p2Max;
+				long ptmp;
+				long idx1, idx2;
+				vr_k = vbase + (long)kIndx * 2 * p2Max;
+				vi_k = vr_k + p2Max;
 				k2 = kIndx<<kIndxStep;
 				if (k1>=k2)
 					ntmp = k1-k2;
@@ -243,12 +257,6 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 					dtmp1 = vg[N-ntmp]*sqrtN;
 				else
 					dtmp1 = 0.0;
-				/*
-				if (k1>=k2)
-				dtmp1 = vg[k1-k2];
-				else
-				dtmp1 = vg[N-(k2-k1)];
-				*/
 				ntmp = N-k1-k2;
 				if (ntmp<pfFilter[L-j2]->size)
 					dtmp2 = vg[ntmp]*sqrtN;
@@ -256,16 +264,8 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 					dtmp2 = vg[N-ntmp]*sqrtN;
 				else
 					dtmp2 = 0.0;
-				/*
-				if (ntmp==N)
-				dtmp2 = vg[0];
-				else
-				dtmp2 = vg[ntmp];
-				*/
 				for (pIndx=0;pIndx<p2Max;pIndx++)
 					{
-					long ptmp; /* Fix 4: was p1 — avoided clobbering outer position variable */
-					long idx1, idx2; /* Fix 6: store %N results to avoid double computation */
 					p2 = pIndx<<pIndxStep;
 					ptmp = labs(p2*(k1-k2));
 					idx1 = ptmp%N;
@@ -285,12 +285,11 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 						dImag2 = -dSin2*dtmp2;
 					else
 						dImag2 = dSin2*dtmp2;
-					*vr++ -= cos_phi*(dReal1+dReal2)+
+					vr_k[pIndx] -= cos_phi*(dReal1+dReal2)+
 						sin_phi*(dImag2-dImag1);
-					*vi++ -= cos_phi*(dImag1+dImag2)+
+					vi_k[pIndx] -= cos_phi*(dImag1+dImag2)+
 						sin_phi*(dReal1-dReal2);
 					} /* end of pIndx loop */
-				vr = vi;
 				} /* end of kIndx loop */
 			} /* end of j2 loop */
 		return;
@@ -299,17 +298,12 @@ void UpdateGabor(GABSIGNAL *trans,WORD word, int MinOctave, int MaxOctave, int L
 	* case 3: the selected word is Gabor
 	*/
 	/* Fix 2: sincos() for the 2*phi pair */
-	
-	// Testing OpenMP parallelization
-	sincos(2.0*phi, &sin_2phi, &cos_2phi);                                                                                                                                                       
+	sincos(2.0*phi, &sin_2phi, &cos_2phi);
 	#pragma omp parallel for schedule(dynamic) \
 		private(n,Lj2,minj,minLj,l2,h2,stepP,stepK,A,B,dp0,dk0, \
-              dkZero,dpZero,ntmp,dpMaxP,dkMaxP,dpMaxN,dkMaxN, \
-              C,flag,dkFirst,cpi,f1_0,f2_0,fs2_0,f3_0)                                                                                                                                         
-	for ( j2=MinOctave; j2<= MaxOctave; j2++)  
-	
-	//sincos(2.0*phi, &sin_2phi, &cos_2phi);
-	//for ( j2=MinOctave; j2<= MaxOctave; j2++)
+		        dkZero,dpZero,ntmp,dpMaxP,dkMaxP,dpMaxN,dkMaxN, \
+		        C,flag,dkFirst,cpi,f1_0,f2_0,fs2_0,f3_0)
+	for ( j2=MinOctave; j2<= MaxOctave; j2++)
 		{
 		/* compute the parameters */
 		n = abs(j2-j1);
@@ -521,7 +515,10 @@ static void gnrRcs(double f[],long posIndxR,long posIndxI,long negIndxR,long neg
 */
 void genericRecursion(double f[],long posIndxR,long posIndxI,long negIndxR,long negIndxI,double fmR,double fmI)
 	{
-	static long posPrevR, posPrevI, negPrevR, negPrevI; /* previous indeces */
+	/* Thread safety: these were 'static' (shared across threads) but are only
+	 * written and read within a single call — auto storage is equivalent and
+	 * lets concurrent gabord() calls run without racing on them. */
+	long posPrevR, posPrevI, negPrevR, negPrevI; /* previous indeces */
 	double rr, ri;
 	posPrevR = posIndxR-1;
 	posPrevI = posIndxI-1;

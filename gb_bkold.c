@@ -25,7 +25,7 @@
 WORD      GaborGetMaxFrmTrans(GABSIGNAL *trans, FILTER *filter,
                                int min_octave, int max_octave, int num_octave,
                                int SubsampleOctaveTime, int SubsampleOctaveFreq);
-void      GaborGetResidue(GABSIGNAL *trans, FILTER *filter, WORD word, int num_octave);
+int       GaborGetResidue(GABSIGNAL *trans, FILTER *filter, WORD word, int num_octave);
 void      BookAppend(BOOK book, WORD word);
 GABSIGNAL *GaborDecomp(GABSIGNAL *trans, GABSIGNAL gabsignal, FILTER *filter,
                         int SubsampleOctaveTime, int SubsampleOctaveFreq,

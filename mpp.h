@@ -14,6 +14,8 @@
 #ifndef MPP_H
 #define MPP_H
 
+#define _GNU_SOURCE
+
 #include <stdio.h>
 #include <ctype.h>
 #include <string.h>
@@ -183,6 +185,29 @@ extern int       old_cur_num_filter;
 extern int       num_filter[MAX_NUM_SB];
 extern int       plot_var;
 extern FILE      *foutput;
+
+/* gabord.c locals referenced from other translation units */
+extern GABSIGNAL *transform[MAX_NUM_SB];
+extern int        TransAlloc[MAX_NUM_SB];
+extern GABSIGNAL  temporary;
+extern double    *cur_norm;
+extern double    *pfG, *pfCE1, *pfCE2, *pfCE3, *pfC, *pfB;
+extern int       *pnAep, *pnIep;
+extern int        cur_l, cur_h;
+
+/* Make all mutable per-call state thread-private so that gabord() can be
+ * called concurrently from different OpenMP threads (one per channel pair).
+ * Requires -fopenmp; ignored silently by non-OpenMP builds. */
+#ifdef _OPENMP
+#pragma omp threadprivate(\
+    gabsignals, library, cur_gabsignal, cur_sig_size,\
+    old_cur_book, old_cur_filter, Current_Book, Old_Book,\
+    filter_type, filter, cur_shift_octave, cur_SOT, cur_SOF,\
+    old_cur_num_filter, num_filter,\
+    transform, TransAlloc, temporary,\
+    cur_norm, pfG, pfCE1, pfCE2, pfCE3, pfC, pfB,\
+    pnAep, pnIep, cur_l, cur_h)
+#endif
 
 #define cur_book         (library[Current_Book])
 #define cur_filter       (filter[Current_Book])

@@ -17,7 +17,9 @@
 /*    random() — now standard POSIX; SCO/i386 platform dead; never called   */
 /*                                                                          */
 /****************************************************************************/
-//#include "mpp.h"
+#include "mpp.h"
+
+#define _GNU_SOURCE
 #include <math.h>
 
 /* M_2_SQRTPI = 2/sqrt(pi) and M_SQRT1_2 = 1/sqrt(2) are both defined in

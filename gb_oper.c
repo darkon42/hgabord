@@ -2,6 +2,9 @@
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 /* real part of complex multiplication */
 #define CMREAL(a1,b1,a2,b2)      ((a1)*(a2)-(b1)*(b2))
@@ -32,6 +35,13 @@ extern int nBoundG;        /* defined in ng_cmd.c */
  * reused across calls. Call GaborOperCleanup() at program exit to free. */
 INDEX indexG1 = (INDEX)NULL;
 INDEX indexG2 = (INDEX)NULL;
+#ifdef _OPENMP
+/* Thread safety: indexG1/indexG2 are lazily allocated and reused inside
+ * GaborGetGaborNorm() (called from the hot path). They must be per-thread so
+ * concurrent gabord() calls don't race on allocation or overwrite each
+ * other's index objects. Each thread frees its own via GaborOperCleanup(). */
+#pragma omp threadprivate(indexG1, indexG2)
+#endif
 
 /* Fix 5: proper prototypes at file scope replacing all K&R-style
  * in-body declarations. */
@@ -149,7 +159,11 @@ WORD GaborGetMaxFrmTrans(GABSIGNAL *trans, FILTER *filter,
         int    jnull[32];
         int    ji, nOct = MaxOctave - MinOctave + 1;
 
-        #pragma omp parallel for schedule(static) \
+        /* if(!omp_in_parallel()): when gabord() is called concurrently from
+         * many threads, the outer loop already saturates the cores — running
+         * this region in parallel too would only add fork/join cost (nesting
+         * off) or oversubscribe (nesting on). Parallelise only for a lone call. */
+        #pragma omp parallel for schedule(static) if(!omp_in_parallel()) \
             private(k, kend, SampleRate_f, SampleRate_n, freq, bndBadK, \
                     n_length, n_2_length, modula, value_r, value_i, index, pointer)
         for (j = MinOctave; j <= MaxOctave; j++) {
@@ -297,9 +311,11 @@ WORD GaborGetMaxFrmTrans(GABSIGNAL *trans, FILTER *filter,
  * Fix 3: perror() → fprintf+return.
  * Fix 6: sincos() replaces separate cos()/sin() calls.
  * Fix 9: modulo-in-loop replaced with running index counters.
+ * Fix 10: return int (0=ok, -1=invalid) so GaborBuildBook can skip
+ *         UpdateGabor/GaborUpdateFourier when the atom position is illegal.
  */
-void GaborGetResidue(GABSIGNAL *trans, FILTER *filter,
-                     WORD word, int num_octave)
+int GaborGetResidue(GABSIGNAL *trans, FILTER *filter,
+                    WORD word, int num_octave)
 {
     int i, shift, index, index1, SigSize, octave, freq;
     double cos_phi, sin_phi, *value, tmp;
@@ -307,11 +323,11 @@ void GaborGetResidue(GABSIGNAL *trans, FILTER *filter,
     /* Fix 3: perror() → fprintf+return */
     if (trans == (GABSIGNAL *)NULL || word == (WORD)NULL) {
         fprintf(stderr, "GaborGetResidue(): null input!\n");
-        return;
+        return -1;
     }
     if (trans[0] == (GABSIGNAL)NULL) {
         fprintf(stderr, "GaborGetResidue(): trans[0] is null!\n");
-        return;
+        return -1;
     }
 
     SigSize = trans[0]->size >> 1;
@@ -323,10 +339,10 @@ void GaborGetResidue(GABSIGNAL *trans, FILTER *filter,
     octave = (int)word->index->octave;
     freq   = (int)word->index->id;
 
-    /* Fix 3: perror() → fprintf+return */
+    /* Fix 3/10: return -1 so GaborBuildBook skips UpdateGabor on bad atoms */
     if (shift > SigSize || shift < 0) {
         fprintf(stderr, "GaborGetResidue(): illegal translation %d\n", shift);
-        return;
+        return -1;
     }
     shift = SigSize - shift;
 
@@ -334,7 +350,7 @@ void GaborGetResidue(GABSIGNAL *trans, FILTER *filter,
         /* Dirac basis */
         word->value = 1.0;
         trans[0]->values[(int)word->index->position] = 0.0;
-        return;
+        return 0;
     }
 
     value = trans[0]->values;
@@ -352,7 +368,7 @@ void GaborGetResidue(GABSIGNAL *trans, FILTER *filter,
             index += freqStep;
             if (index >= SigSize) index -= SigSize;
         }
-        return;
+        return 0;
     }
 
     /* Gabor basis
@@ -380,6 +396,7 @@ void GaborGetResidue(GABSIGNAL *trans, FILTER *filter,
             index1 += 1;         if (index1 >= SigSize) index1 -= SigSize;
         }
     }
+    return 0;
 }
 
 /*
@@ -392,31 +409,34 @@ static void GaborArrayMax(FILTER *filter, double *value, int size,
                            double *modula, double *v_r, double *v_i,
                            int *index)
 {
-    int i;
-    double m, *p_r, *p_i;
+    int i, idx = 0;
+    double m, mod = 0.0, vr = 0.0, vi = 0.0;
+    double *p_r, *p_i;
 
     /* suppress unused-parameter warnings for parameters used by caller
      * for context but not needed inside this function */
     (void)filter; (void)SigSize; (void)Log2SigSize;
     (void)octave; (void)freq; (void)SampleRate_n;
 
-    *modula = 0.0;
-    *v_r    = 0.0;
-    *v_i    = 0.0;
-    *index  = 0;
+    /* Speed: accumulate into locals rather than through the caller's output
+     * pointers. Writing the results inside the loop forced the compiler to
+     * reload them every iteration (it cannot prove they don't alias value[]);
+     * locals stay in registers and let the modulus reduction vectorise. */
     p_r = value;
     p_i = value + size;
     for (i = 0; i < size; i++) {
-        m = (*p_r) * (*p_r) + (*p_i) * (*p_i);
-        if (m > *modula) {
-            *modula = m;
-            *v_r    = *p_r;
-            *v_i    = *p_i;
-            *index  = i;
+        m = p_r[i] * p_r[i] + p_i[i] * p_i[i];
+        if (m > mod) {
+            mod = m;
+            vr  = p_r[i];
+            vi  = p_i[i];
+            idx = i;
         }
-        p_r++;
-        p_i++;
     }
+    *modula = mod;
+    *v_r    = vr;
+    *v_i    = vi;
+    *index  = idx;
 }
 
 /*
@@ -763,6 +783,11 @@ static double interpolation(double f[3][3], long *k, long *p,
     fp  = (f[1][2] - f[1][0]) / (2.0*dp);
     det = fkk*fpp - fkp*fkp;
 
+    /* Singular Hessian: Newton step would be ±Inf/NaN and the while loops
+     * below would not terminate. Return the current energy unchanged. */
+    if (fabs(det) < 1e-10)
+        return f[1][1];
+
     ktmp = (double)(*k) - (fpp*fk - fkp*fp) / det;
     ptmp = (double)(*p) - (fkk*fp - fkp*fk) / det;
 
@@ -773,10 +798,15 @@ static double interpolation(double f[3][3], long *k, long *p,
 
     fe = f[1][1] + fk*dk + fp*dp + (fkk*dks + fpp*dps)/2.0 + fkp*dk*dp;
 
-    /* Fix 8: single if replaces while loop — Newton correction is at most
-     * one period away from zero */
-    if (ktmp < 0.0) ktmp += (double)N;
-    if (ptmp < 0.0) ptmp += (double)N;
+    /* Revert Fix 8: a single += N is not sufficient when det is small but
+     * nonzero — the Newton step can land many periods below zero, leaving
+     * ptmp/ktmp negative after one correction and producing negative indices
+     * that crash innSigWvForm. The original while loops are safe here because
+     * the singular case is already handled above.
+     * was: if (ktmp < 0.0) ktmp += (double)N;
+     *      if (ptmp < 0.0) ptmp += (double)N; */
+    while (ktmp < 0.0) ktmp += (double)N;
+    while (ptmp < 0.0) ptmp += (double)N;
 
     *k  = (long)(ktmp / dkF + 0.5) * (long)dkF;
     *p  = (long)(ptmp / dpF + 0.5) * (long)dpF;
